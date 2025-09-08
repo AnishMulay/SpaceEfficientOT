@@ -70,35 +70,26 @@ def spef_matching_torch(
     while f > f_threshold:
         ind_b_free = dq.pop_front(k)
         slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
-        local_ind_S_zero_ind = torch.where(slack_tile == 0)
-        global_ind_S_zero_ind = (ind_b_free[local_ind_S_zero_ind[0]], local_ind_S_zero_ind[1])
-        
-        if iteration == 0:
-            print(f"SPEF - local_ind_S_zero_ind[0] type: {type(local_ind_S_zero_ind[0])}, shape: {local_ind_S_zero_ind[0].shape}, dtype: {local_ind_S_zero_ind[0].dtype}")
-            print(f"SPEF - local_ind_S_zero_ind[1] type: {type(local_ind_S_zero_ind[1])}, shape: {local_ind_S_zero_ind[1].shape}, dtype: {local_ind_S_zero_ind[1].dtype}")
-            print(f"SPEF - global_ind_S_zero_ind[0] type: {type(global_ind_S_zero_ind[0])}, shape: {global_ind_S_zero_ind[0].shape}, dtype: {global_ind_S_zero_ind[0].dtype}")
-            print(f"SPEF - global_ind_S_zero_ind[1] type: {type(global_ind_S_zero_ind[1])}, shape: {global_ind_S_zero_ind[1].shape}, dtype: {global_ind_S_zero_ind[1].dtype}")
-            print(f"SPEF - ind_b_free type: {type(ind_b_free)}, shape: {ind_b_free.shape}, dtype: {ind_b_free.dtype}")
+        # Find local zero-slack coordinates within the KxN tile
+        local_ind_S_zero_ind = torch.where(slack_tile == 0)  # (rows in 0..K-1, cols in 0..N-1)
 
-        ind_b_tent_ind, free_S_edge_B_ind_range_lt_inclusive = unique(global_ind_S_zero_ind[0], input_sorted=True)
-        ind_b_tent = ind_b_free[ind_b_tent_ind]
-        
-        if iteration == 0:
-            print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive: {free_S_edge_B_ind_range_lt_inclusive}")
-            print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive[1:]: {free_S_edge_B_ind_range_lt_inclusive[1:]}")
-            shape_val = global_ind_S_zero_ind[0].shape[0]
-            print(f"SPEF - shape_val: {shape_val}, type: {type(shape_val)}")
-            tensor_to_cat = torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=dtyp, requires_grad=False)
-            print(f"SPEF - tensor_to_cat: {tensor_to_cat}")
-            print(f"SPEF - dtyp: {dtyp}")
-            print(f"SPEF - tensor_to_cat dtype: {tensor_to_cat.dtype}")
-            print(f"SPEF - About to concatenate: {free_S_edge_B_ind_range_lt_inclusive[1:]} with {tensor_to_cat}")
-        free_S_edge_B_ind_range_rt_exclusive = torch.cat((free_S_edge_B_ind_range_lt_inclusive[1:], torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=free_S_edge_B_ind_range_lt_inclusive.dtype, requires_grad=False)))
-        rand_n = torch.rand(ind_b_tent.shape[0], device=device)
-        free_S_edge_B_ind_rand = free_S_edge_B_ind_range_lt_inclusive + ((free_S_edge_B_ind_range_rt_exclusive - free_S_edge_B_ind_range_lt_inclusive)*rand_n).to(dtyp)
-        ind_a_tent = global_ind_S_zero_ind[1][free_S_edge_B_ind_rand]
+        # Group by local B rows (tile-local), exactly mirroring matching.py semantics
+        ind_b_tent_local, group_starts = unique(local_ind_S_zero_ind[0], input_sorted=True)
+        group_ends = torch.cat((group_starts[1:], group_starts.new_tensor([local_ind_S_zero_ind[0].shape[0]])))  # right-exclusive
+
+        # Sample one zero-edge per local B
+        rand_n = torch.rand(ind_b_tent_local.shape[0], device=device)
+        pick = group_starts + ((group_ends - group_starts) * rand_n).to(dtyp)
+
+        # Candidate A per local B row
+        ind_a_tent = local_ind_S_zero_ind[1][pick]
+
+        # Deduplicate A; select aligned local B rows
         ind_a_push, tent_ind = unique(ind_a_tent, input_sorted=False)
-        ind_b_push = ind_b_tent[tent_ind]
+        ind_b_push_local = ind_b_tent_local[tent_ind]
+
+        # Convert selected local B rows to global B ids only now
+        ind_b_push = ind_b_free[ind_b_push_local]
         
         ind_release = torch.nonzero(Ma[ind_a_push] != -1, as_tuple=True)[0]
         edges_released = (Ma[ind_a_push][ind_release], ind_a_push[ind_release])
@@ -128,7 +119,7 @@ def spef_matching_torch(
     Mb = Mb.cpu().detach()
     
     ind_a = 0
-    for ind_b in range(n):
+    for ind_b in range(m):
         if Mb[ind_b] == -1:
             while Ma[ind_a] != -1:
                 ind_a += 1
