@@ -32,7 +32,7 @@ class CudaDeque:
         return (self.capacity - self.size)
 
     def _write_range(self, start, data):
-        n = torch.tensor(data.shape, device=self.device, dtype=torch.int64)
+        n = torch.tensor(data.shape[0], device=self.device, dtype=torch.int64)
         cap = self.capacity
         end = (start + n)
         # two-slice wrap write
