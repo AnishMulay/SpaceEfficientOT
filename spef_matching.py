@@ -72,6 +72,13 @@ def spef_matching_torch(
         slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
         local_ind_S_zero_ind = torch.where(slack_tile == 0)
         global_ind_S_zero_ind = (ind_b_free[local_ind_S_zero_ind[0]], local_ind_S_zero_ind[1])
+        
+        if iteration == 0:
+            print(f"SPEF - local_ind_S_zero_ind[0] type: {type(local_ind_S_zero_ind[0])}, shape: {local_ind_S_zero_ind[0].shape}, dtype: {local_ind_S_zero_ind[0].dtype}")
+            print(f"SPEF - local_ind_S_zero_ind[1] type: {type(local_ind_S_zero_ind[1])}, shape: {local_ind_S_zero_ind[1].shape}, dtype: {local_ind_S_zero_ind[1].dtype}")
+            print(f"SPEF - global_ind_S_zero_ind[0] type: {type(global_ind_S_zero_ind[0])}, shape: {global_ind_S_zero_ind[0].shape}, dtype: {global_ind_S_zero_ind[0].dtype}")
+            print(f"SPEF - global_ind_S_zero_ind[1] type: {type(global_ind_S_zero_ind[1])}, shape: {global_ind_S_zero_ind[1].shape}, dtype: {global_ind_S_zero_ind[1].dtype}")
+            print(f"SPEF - ind_b_free type: {type(ind_b_free)}, shape: {ind_b_free.shape}, dtype: {ind_b_free.dtype}")
 
         ind_b_tent_ind, free_S_edge_B_ind_range_lt_inclusive = unique(global_ind_S_zero_ind[0], input_sorted=True)
         ind_b_tent = ind_b_free[ind_b_tent_ind]

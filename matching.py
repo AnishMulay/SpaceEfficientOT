@@ -93,6 +93,10 @@ def matching_torch_v1(W, C, delta, device, seed=1):
     while f > f_threshold:
         ind_b_free = torch.where(Mb == m_one)
         ind_S_zero_ind = torch.where(S[ind_b_free] == zero)
+        
+        if iteration == 0:
+            print(f"ORIGINAL - ind_S_zero_ind[0] type: {type(ind_S_zero_ind[0])}, shape: {ind_S_zero_ind[0].shape}, dtype: {ind_S_zero_ind[0].dtype}")
+            print(f"ORIGINAL - ind_S_zero_ind[1] type: {type(ind_S_zero_ind[1])}, shape: {ind_S_zero_ind[1].shape}, dtype: {ind_S_zero_ind[1].dtype}")
 
         # find push edges
         ind_b_tent_ind, free_S_edge_B_ind_range_lt_inclusive = unique(ind_S_zero_ind[0], input_sorted=True)
