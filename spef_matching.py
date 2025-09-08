@@ -44,8 +44,8 @@ def spef_matching_torch(
     n = xA.shape[0]
     m = xB.shape[0]
 
-    xA = xA.to(device=device, dtype=dtyp)
-    xB = xB.to(device=device, dtype=dtyp)
+    xA = xA.to(device=device)
+    xB = xB.to(device=device)
 
     yB = torch.ones(m, device=device, dtype=dtyp, requires_grad=False)
     yA = torch.zeros(n, device=device, dtype=dtyp, requires_grad=False)
