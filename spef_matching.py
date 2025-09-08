@@ -86,6 +86,8 @@ def spef_matching_torch(
         if iteration == 0:
             print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive: {free_S_edge_B_ind_range_lt_inclusive}")
             print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive[1:]: {free_S_edge_B_ind_range_lt_inclusive[1:]}")
+            shape_val = global_ind_S_zero_ind[0].shape[0]
+            print(f"SPEF - shape_val: {shape_val}, type: {type(shape_val)}")
             tensor_to_cat = torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=dtyp, requires_grad=False)
             print(f"SPEF - tensor_to_cat: {tensor_to_cat}")
             print(f"SPEF - About to concatenate: {free_S_edge_B_ind_range_lt_inclusive[1:]} with {tensor_to_cat}")
