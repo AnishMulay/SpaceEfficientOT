@@ -82,6 +82,10 @@ def spef_matching_torch(
 
         ind_b_tent_ind, free_S_edge_B_ind_range_lt_inclusive = unique(global_ind_S_zero_ind[0], input_sorted=True)
         ind_b_tent = ind_b_free[ind_b_tent_ind]
+        
+        if iteration == 0:
+            print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive: {free_S_edge_B_ind_range_lt_inclusive}")
+            print(f"SPEF - free_S_edge_B_ind_range_lt_inclusive[1:]: {free_S_edge_B_ind_range_lt_inclusive[1:]}")
         free_S_edge_B_ind_range_rt_exclusive = torch.cat((free_S_edge_B_ind_range_lt_inclusive[1:], torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=dtyp, requires_grad=False)))
         rand_n = torch.rand(ind_b_tent.shape[0], device=device)
         free_S_edge_B_ind_rand = free_S_edge_B_ind_range_lt_inclusive + ((free_S_edge_B_ind_range_rt_exclusive - free_S_edge_B_ind_range_lt_inclusive)*rand_n).to(dtyp)
