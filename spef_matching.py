@@ -93,7 +93,7 @@ def spef_matching_torch(
             print(f"SPEF - dtyp: {dtyp}")
             print(f"SPEF - tensor_to_cat dtype: {tensor_to_cat.dtype}")
             print(f"SPEF - About to concatenate: {free_S_edge_B_ind_range_lt_inclusive[1:]} with {tensor_to_cat}")
-        free_S_edge_B_ind_range_rt_exclusive = torch.cat((free_S_edge_B_ind_range_lt_inclusive[1:], torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=dtyp, requires_grad=False)))
+        free_S_edge_B_ind_range_rt_exclusive = torch.cat((free_S_edge_B_ind_range_lt_inclusive[1:], torch.tensor([global_ind_S_zero_ind[0].shape[0]], device=device, dtype=free_S_edge_B_ind_range_lt_inclusive.dtype, requires_grad=False)))
         rand_n = torch.rand(ind_b_tent.shape[0], device=device)
         free_S_edge_B_ind_rand = free_S_edge_B_ind_range_lt_inclusive + ((free_S_edge_B_ind_range_rt_exclusive - free_S_edge_B_ind_range_lt_inclusive)*rand_n).to(dtyp)
         ind_a_tent = global_ind_S_zero_ind[1][free_S_edge_B_ind_rand]
