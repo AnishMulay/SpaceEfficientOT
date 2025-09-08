@@ -59,7 +59,7 @@ class CudaDeque:
     def push_back(self, x_batch: torch.Tensor):
         # append batch at tail
         self._ensure_cuda(x_batch)
-        k = torch.tensor(x_batch.shape, device=self.device, dtype=torch.int64)
+        k = torch.tensor(x_batch.shape[0], device=self.device, dtype=torch.int64)
         if int((self.size + k > self.capacity).item()):
             raise RuntimeError("CudaDeque overflow on push_back")
         t = self.tail
@@ -69,7 +69,7 @@ class CudaDeque:
     def push_front(self, x_batch: torch.Tensor):
         # prepend batch at head
         self._ensure_cuda(x_batch)
-        k = torch.tensor(x_batch.shape, device=self.device, dtype=torch.int64)
+        k = torch.tensor(x_batch.shape[0], device=self.device, dtype=torch.int64)
         if int((self.size + k > self.capacity).item()):
             raise RuntimeError("CudaDeque overflow on push_front")
         cap = self.capacity

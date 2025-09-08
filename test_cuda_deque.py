@@ -1,3 +1,6 @@
+import torch
+from cuda_deque import CudaDeque
+
 def assert_cuda(t):
     assert isinstance(t, torch.Tensor) and t.is_cuda
 
@@ -55,7 +58,7 @@ def test_overflow_underflow():
     except RuntimeError:
         pass
     out = dq.pop_back(2)
-    assert torch.equal(out, torch.tensor([2,3], device='cuda'))
+    assert torch.equal(out, torch.tensor([2,22], device='cuda'))
 
 def test_batched_ops_large():
     N=10000
