@@ -19,17 +19,36 @@ def compute_slack_tile(
     xB, 
     yA, 
     yB, 
-    delta
+    delta,
+    slack_tile=None
 ):
-    xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
-    xb2 = (xb*xb).sum(dim=1, keepdim=True)                         # [K,1]
-    xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
-    cross = xb @ xA.T                                              # [K,N]
-    w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
-    c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
-    c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
-    slack = c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1)
-    return slack                                                   # [K,N] int64
+    current_k = len(idxB)
+    
+    if slack_tile is not None and current_k <= slack_tile.shape[0]:
+        # Reuse pre-allocated tensor
+        slack_view = slack_tile[:current_k]
+        slack_view.zero_()
+        
+        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
+        xb2 = (xb*xb).sum(dim=1, keepdim=True)                         # [K,1]
+        xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
+        cross = xb @ xA.T                                              # [K,N]
+        w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
+        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
+        c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
+        slack_view.copy_(c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1))
+        return slack_view                                              # [current_k,N] int64
+    else:
+        # Original allocation for fallback
+        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
+        xb2 = (xb*xb).sum(dim=1, keepdim=True)                         # [K,1]
+        xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
+        cross = xb @ xA.T                                              # [K,N]
+        w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
+        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
+        c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
+        slack = c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1)
+        return slack                                                   # [K,N] int64
 
 
 def spef_matching_torch(
@@ -164,6 +183,9 @@ def spef_matching_2(
 
     f_threshold = m*delta/C
     torch.manual_seed(seed)
+    
+    # Pre-allocate slack tile for reuse
+    slack_tile = torch.zeros(k, n, device=device, dtype=torch.int64)
 
     while f > f_threshold:
         # Get all free B points
@@ -174,8 +196,8 @@ def spef_matching_2(
             end_idx = min(start_idx + k, len(ind_b_all_free))
             ind_b_free = ind_b_all_free[start_idx:end_idx]
             
-            slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
-            local_ind_S_zero_ind = torch.where(slack_tile == 0)
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile)
+            local_ind_S_zero_ind = torch.where(slack_tile_used == 0)
 
             # Group by local B rows (tile-local), exactly mirroring matching.py semantics
             ind_b_tent_local, group_starts = unique(local_ind_S_zero_ind[0], input_sorted=True)
@@ -207,7 +229,7 @@ def spef_matching_2(
             Mb[ind_b_push] = ind_a_push
             yA[ind_a_push] -= one
             
-            min_slack, _ = torch.min(slack_tile, dim=1)
+            min_slack, _ = torch.min(slack_tile_used, dim=1)
             min_slack_ind = torch.where(min_slack!=0)[0]
             ind_b_not_pushed = ind_b_free[min_slack_ind]
             yB[ind_b_not_pushed] += min_slack[min_slack_ind]

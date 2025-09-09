@@ -36,7 +36,8 @@ def test_matching_algorithms():
     # Run original matching algorithm with timing and memory tracking
     print("\nRunning matching_torch_v1...")
     if device.type == 'cuda':
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.empty_cache()
+        baseline_memory = torch.cuda.memory_allocated(device)
         torch.cuda.synchronize()
     
     start_time = time.time()
@@ -46,7 +47,7 @@ def test_matching_algorithms():
     end_time = time.time()
     
     original_time = end_time - start_time
-    original_memory = torch.cuda.max_memory_allocated(device) / 1024**2 if device.type == 'cuda' else 0
+    original_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
     
     print(f"Original algorithm completed in {iteration} iterations")
     print(f"Original algorithm time: {original_time:.4f} seconds")
@@ -56,7 +57,8 @@ def test_matching_algorithms():
     # Run SPEF matching with timing and memory tracking
     print("\nRunning spef_matching_2...")
     if device.type == 'cuda':
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.empty_cache()
+        baseline_memory = torch.cuda.memory_allocated(device)
         torch.cuda.synchronize()
     
     start_time = time.time()
@@ -66,7 +68,7 @@ def test_matching_algorithms():
     end_time = time.time()
     
     spef_time = end_time - start_time
-    spef_memory = torch.cuda.max_memory_allocated(device) / 1024**2 if device.type == 'cuda' else 0
+    spef_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
     
     print(f"SPEF matching completed in {spef_iteration} iterations")
     print(f"SPEF matching time: {spef_time:.4f} seconds")
