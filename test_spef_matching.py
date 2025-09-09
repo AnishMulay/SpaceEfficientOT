@@ -7,9 +7,9 @@ from spef_matching import spef_matching_2
 
 def test_matching_algorithms():
     # Set parameters
-    n = 1000
+    n = 20000
     d = 2
-    k = 100  # tile size
+    k = 2000  # tile size
     delta = 0.01
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -58,8 +58,6 @@ def test_matching_algorithms():
         print(f"Matching cost: {matching_cost.item():.4f}")
     except Exception as e:
         print(f"Error in original algorithm: {e}")
-        original_time = 0
-        original_memory = 0
     
     # Clean up original algorithm tensors
     try:
@@ -93,18 +91,6 @@ def test_matching_algorithms():
         print(f"SPEF matching cost: {spef_cost.item():.4f}")
     except Exception as e:
         print(f"Error in SPEF algorithm: {e}")
-        spef_time = 0
-        spef_memory = 0
-    
-    # Summary comparison
-    print("\n" + "="*50)
-    print("PERFORMANCE COMPARISON")
-    print("="*50)
-    print(f"Original vs SPEF - Time: {original_time:.4f}s vs {spef_time:.4f}s (speedup: {original_time/spef_time:.2f}x)")
-    print(f"Original vs SPEF - Memory: {original_memory:.2f}MB vs {spef_memory:.2f}MB")
-    if original_memory > 0:
-        print(f"Memory reduction: {original_memory/spef_memory:.2f}x")
-    print(f"Original vs SPEF - Iterations: {iteration} vs {spef_iteration}")
     
     print("\nTest completed successfully!")
 
