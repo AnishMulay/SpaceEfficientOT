@@ -62,7 +62,10 @@ def test_matching_algorithms():
         original_memory = 0
     
     # Clean up original algorithm tensors
-    del W_tensor, C, Mb, yA, yB
+    try:
+        del W_tensor, C, Mb, yA, yB
+    except:
+        pass
     
     # Run SPEF matching with timing and memory tracking
     print("\nRunning spef_matching_2...")
