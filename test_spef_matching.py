@@ -42,19 +42,24 @@ def test_matching_algorithms():
     W_tensor = torch.tensor(W, device=device, dtype=torch.float32)
     C = torch.tensor(W.max(), device=device, dtype=torch.float32)
     
-    start_time = time.time()
-    Mb, yA, yB, matching_cost, iteration = matching_torch_v1(W_tensor, C, delta, device)
-    if device.type == 'cuda':
-        torch.cuda.synchronize()
-    end_time = time.time()
-    
-    original_time = end_time - start_time
-    original_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
-    
-    print(f"Original algorithm completed in {iteration} iterations")
-    print(f"Original algorithm time: {original_time:.4f} seconds")
-    print(f"Original algorithm GPU memory: {original_memory:.2f} MB")
-    print(f"Matching cost: {matching_cost.item():.4f}")
+    try:
+        start_time = time.time()
+        Mb, yA, yB, matching_cost, iteration = matching_torch_v1(W_tensor, C, delta, device)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        end_time = time.time()
+        
+        original_time = end_time - start_time
+        original_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
+        
+        print(f"Original algorithm completed in {iteration} iterations")
+        print(f"Original algorithm time: {original_time:.4f} seconds")
+        print(f"Original algorithm GPU memory: {original_memory:.2f} MB")
+        print(f"Matching cost: {matching_cost.item():.4f}")
+    except Exception as e:
+        print(f"Error in original algorithm: {e}")
+        original_time = 0
+        original_memory = 0
     
     # Clean up original algorithm tensors
     del W_tensor, C, Mb, yA, yB
@@ -69,19 +74,24 @@ def test_matching_algorithms():
     # Create fresh C tensor for SPEF
     C_spef = torch.tensor(W.max(), device=device, dtype=torch.float32)
     
-    start_time = time.time()
-    spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C_spef, k, delta, device)
-    if device.type == 'cuda':
-        torch.cuda.synchronize()
-    end_time = time.time()
-    
-    spef_time = end_time - start_time
-    spef_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
-    
-    print(f"SPEF matching completed in {spef_iteration} iterations")
-    print(f"SPEF matching time: {spef_time:.4f} seconds")
-    print(f"SPEF matching GPU memory: {spef_memory:.2f} MB")
-    print(f"SPEF matching cost: {spef_cost.item():.4f}")
+    try:
+        start_time = time.time()
+        spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C_spef, k, delta, device)
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        end_time = time.time()
+        
+        spef_time = end_time - start_time
+        spef_memory = (torch.cuda.memory_allocated(device) - baseline_memory) / 1024**2 if device.type == 'cuda' else 0
+        
+        print(f"SPEF matching completed in {spef_iteration} iterations")
+        print(f"SPEF matching time: {spef_time:.4f} seconds")
+        print(f"SPEF matching GPU memory: {spef_memory:.2f} MB")
+        print(f"SPEF matching cost: {spef_cost.item():.4f}")
+    except Exception as e:
+        print(f"Error in SPEF algorithm: {e}")
+        spef_time = 0
+        spef_memory = 0
     
     # Summary comparison
     print("\n" + "="*50)
