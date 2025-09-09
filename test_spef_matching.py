@@ -7,9 +7,9 @@ from spef_matching import spef_matching_2
 
 def test_matching_algorithms():
     # Set parameters
-    n = 100
-    d = 10
-    k = 10  # tile size
+    n = 1000
+    d = 2
+    k = 100  # tile size
     delta = 0.01
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -27,11 +27,9 @@ def test_matching_algorithms():
     xa_cpu = xa.cpu().numpy()
     xb_cpu = xb.cpu().numpy()
     W = cdist(xb_cpu, xa_cpu, 'sqeuclidean')
-    W_tensor = torch.tensor(W, device=device, dtype=torch.float32)
-    C = torch.tensor(W.max(), device=device, dtype=torch.float32)
     
-    print(f"Cost matrix shape: {W_tensor.shape}")
-    print(f"Max cost C: {C.item():.4f}")
+    print(f"Cost matrix shape: {W.shape}")
+    print(f"Max cost C: {W.max():.4f}")
     
     # Run original matching algorithm with timing and memory tracking
     print("\nRunning matching_torch_v1...")
@@ -39,6 +37,10 @@ def test_matching_algorithms():
         torch.cuda.empty_cache()
         baseline_memory = torch.cuda.memory_allocated(device)
         torch.cuda.synchronize()
+    
+    # Allocate tensors after baseline measurement
+    W_tensor = torch.tensor(W, device=device, dtype=torch.float32)
+    C = torch.tensor(W.max(), device=device, dtype=torch.float32)
     
     start_time = time.time()
     Mb, yA, yB, matching_cost, iteration = matching_torch_v1(W_tensor, C, delta, device)
@@ -54,6 +56,9 @@ def test_matching_algorithms():
     print(f"Original algorithm GPU memory: {original_memory:.2f} MB")
     print(f"Matching cost: {matching_cost.item():.4f}")
     
+    # Clean up original algorithm tensors
+    del W_tensor, C, Mb, yA, yB
+    
     # Run SPEF matching with timing and memory tracking
     print("\nRunning spef_matching_2...")
     if device.type == 'cuda':
@@ -61,8 +66,11 @@ def test_matching_algorithms():
         baseline_memory = torch.cuda.memory_allocated(device)
         torch.cuda.synchronize()
     
+    # Create fresh C tensor for SPEF
+    C_spef = torch.tensor(W.max(), device=device, dtype=torch.float32)
+    
     start_time = time.time()
-    spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C, k, delta, device)
+    spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C_spef, k, delta, device)
     if device.type == 'cuda':
         torch.cuda.synchronize()
     end_time = time.time()
@@ -81,6 +89,8 @@ def test_matching_algorithms():
     print("="*50)
     print(f"Original vs SPEF - Time: {original_time:.4f}s vs {spef_time:.4f}s (speedup: {original_time/spef_time:.2f}x)")
     print(f"Original vs SPEF - Memory: {original_memory:.2f}MB vs {spef_memory:.2f}MB")
+    if original_memory > 0:
+        print(f"Memory reduction: {original_memory/spef_memory:.2f}x")
     print(f"Original vs SPEF - Iterations: {iteration} vs {spef_iteration}")
     
     print("\nTest completed successfully!")
