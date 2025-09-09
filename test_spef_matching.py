@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import time
 from scipy.spatial.distance import cdist
 from matching import matching_torch_v1
 from spef_matching import spef_matching_2
@@ -32,17 +33,53 @@ def test_matching_algorithms():
     print(f"Cost matrix shape: {W_tensor.shape}")
     print(f"Max cost C: {C.item():.4f}")
     
-    # Run original matching algorithm
+    # Run original matching algorithm with timing and memory tracking
     print("\nRunning matching_torch_v1...")
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize()
+    
+    start_time = time.time()
     Mb, yA, yB, matching_cost, iteration = matching_torch_v1(W_tensor, C, delta, device)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    end_time = time.time()
+    
+    original_time = end_time - start_time
+    original_memory = torch.cuda.max_memory_allocated(device) / 1024**2 if device.type == 'cuda' else 0
+    
     print(f"Original algorithm completed in {iteration} iterations")
+    print(f"Original algorithm time: {original_time:.4f} seconds")
+    print(f"Original algorithm GPU memory: {original_memory:.2f} MB")
     print(f"Matching cost: {matching_cost.item():.4f}")
     
-    # Run SPEF matching
-    print("\nRunning spef_matching_torch...")
+    # Run SPEF matching with timing and memory tracking
+    print("\nRunning spef_matching_2...")
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize()
+    
+    start_time = time.time()
     spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C, k, delta, device)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    end_time = time.time()
+    
+    spef_time = end_time - start_time
+    spef_memory = torch.cuda.max_memory_allocated(device) / 1024**2 if device.type == 'cuda' else 0
+    
     print(f"SPEF matching completed in {spef_iteration} iterations")
+    print(f"SPEF matching time: {spef_time:.4f} seconds")
+    print(f"SPEF matching GPU memory: {spef_memory:.2f} MB")
     print(f"SPEF matching cost: {spef_cost.item():.4f}")
+    
+    # Summary comparison
+    print("\n" + "="*50)
+    print("PERFORMANCE COMPARISON")
+    print("="*50)
+    print(f"Original vs SPEF - Time: {original_time:.4f}s vs {spef_time:.4f}s (speedup: {original_time/spef_time:.2f}x)")
+    print(f"Original vs SPEF - Memory: {original_memory:.2f}MB vs {spef_memory:.2f}MB")
+    print(f"Original vs SPEF - Iterations: {iteration} vs {spef_iteration}")
     
     print("\nTest completed successfully!")
 
