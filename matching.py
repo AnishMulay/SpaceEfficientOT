@@ -5,41 +5,39 @@ from scipy.spatial.distance import cdist
 def feasibility_check(ind_b, ind_a, yB, yA, Ma, cost):
     # check feasibility
     if yA[ind_a] + yB[ind_b] > cost[ind_b][ind_a] + 1:
-                print("assertion failed")
+                pass
     if Ma[ind_a] == ind_b and yA[ind_a] + yB[ind_b] != cost[ind_b][ind_a]:
-                print("assertion failed in matching")
-                print(yA[ind_a] + yB[ind_b])
-                print(cost[ind_b][ind_a])
+                pass
 
 def matching_check(Ma, Mb):
     # check matching
     if np.size(np.where(Mb == -1)) != 0:
-        print("exist empty matching")
+        pass
     if np.size(np.where(Ma == -1)) != 0:
-        print("exist empty matching")
+        pass
     for ind_b in range(Mb.shape[0]):
         ind_a = Mb[ind_b]
         if ind_a != -1 and ind_b != Ma[ind_a]:
-            print("mismatching")
+            pass
     for ind_a in range(Ma.shape[0]):
         ind_b = Ma[ind_a]
         if ind_b != -1 and ind_a != Mb[ind_b]:
-            print("mismatching")
+            pass
 
 def matching_check_torch(Ma, Mb):
     # check matching
     if torch.size(torch.where(Mb == -1)) != 0:
-        print("exist empty matching")
+        pass
     if torch.size(torch.where(Ma == -1)) != 0:
-        print("exist empty matching")
+        pass
     for ind_b in range(Mb.shape[0]):
         ind_a = Mb[ind_b]
         if ind_a != -1 and ind_b != Ma[ind_a]:
-            print("mismatching")
+            pass
     for ind_a in range(Ma.shape[0]):
         ind_b = Ma[ind_a]
         if ind_b != -1 and ind_a != Mb[ind_b]:
-            print("mismatching")
+            pass
 
 def matching_torch_v1(W, C, delta, device, seed=1):
     """
@@ -94,9 +92,7 @@ def matching_torch_v1(W, C, delta, device, seed=1):
         ind_b_free = torch.where(Mb == m_one)
         ind_S_zero_ind = torch.where(S[ind_b_free] == zero)
         
-        if iteration == 0:
-            print(f"ORIGINAL - ind_S_zero_ind[0] type: {type(ind_S_zero_ind[0])}, shape: {ind_S_zero_ind[0].shape}, dtype: {ind_S_zero_ind[0].dtype}")
-            print(f"ORIGINAL - ind_S_zero_ind[1] type: {type(ind_S_zero_ind[1])}, shape: {ind_S_zero_ind[1].shape}, dtype: {ind_S_zero_ind[1].dtype}")
+
 
         # find push edges
         ind_b_tent_ind, free_S_edge_B_ind_range_lt_inclusive = unique(ind_S_zero_ind[0], input_sorted=True)

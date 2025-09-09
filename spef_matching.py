@@ -70,7 +70,6 @@ def spef_matching_torch(
     while f > f_threshold:
         ind_b_free = dq.pop_front(k)
         slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
-        # Find local zero-slack coordinates within the KxN tile
         local_ind_S_zero_ind = torch.where(slack_tile == 0)  # (rows in 0..K-1, cols in 0..N-1)
 
         # Group by local B rows (tile-local), exactly mirroring matching.py semantics
@@ -110,6 +109,106 @@ def spef_matching_torch(
         
         dq.push_back(edges_released[0])
         dq.push_back(ind_b_not_pushed)
+        
+        iteration += 1
+    
+    yA = yA.cpu().detach()   
+    yB = yB.cpu().detach()
+    Ma = Ma.cpu().detach()
+    Mb = Mb.cpu().detach()
+    
+    ind_a = 0
+    for ind_b in range(m):
+        if Mb[ind_b] == -1:
+            while Ma[ind_a] != -1:
+                ind_a += 1
+            Mb[ind_b] = ind_a
+            Ma[ind_a] = ind_b
+    
+    xA_cpu = xA.cpu().float()
+    xB_cpu = xB.cpu().float()
+    matched_pairs_cost = torch.sum((xA_cpu - xB_cpu[Mb])**2, dim=1)
+    matching_cost = torch.sum(matched_pairs_cost)
+
+    return Mb, yA, yB, matching_cost, iteration
+
+def spef_matching_2(
+    xA,
+    xB,
+    C,
+    k,
+    delta,
+    device,
+    seed=1
+):
+    dtyp = torch.int64
+    n = xA.shape[0]
+    m = xB.shape[0]
+
+    xA = xA.to(device=device)
+    xB = xB.to(device=device)
+
+    yB = torch.ones(m, device=device, dtype=dtyp, requires_grad=False)
+    yA = torch.zeros(n, device=device, dtype=dtyp, requires_grad=False)
+    Mb = torch.ones(m, device=device, dtype=dtyp, requires_grad=False) * -1
+    Ma = torch.ones(n, device=device, dtype=dtyp, requires_grad=False) * -1
+
+    f = n
+    iteration = 0
+
+    zero = torch.tensor([0], device=device, dtype=dtyp, requires_grad=False)[0]
+    one = torch.tensor([1], device=device, dtype=dtyp, requires_grad=False)[0]
+    minus_one = torch.tensor([-1], device=device, dtype=dtyp, requires_grad=False)[0]
+
+    f_threshold = m*delta/C
+    torch.manual_seed(seed)
+
+    while f > f_threshold:
+        # Get all free B points
+        ind_b_all_free = torch.where(Mb == minus_one)[0]
+        
+        # Process k points at a time
+        for start_idx in range(0, len(ind_b_all_free), k):
+            end_idx = min(start_idx + k, len(ind_b_all_free))
+            ind_b_free = ind_b_all_free[start_idx:end_idx]
+            
+            slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
+            local_ind_S_zero_ind = torch.where(slack_tile == 0)
+
+            # Group by local B rows (tile-local), exactly mirroring matching.py semantics
+            ind_b_tent_local, group_starts = unique(local_ind_S_zero_ind[0], input_sorted=True)
+            group_ends = torch.cat((group_starts[1:], group_starts.new_tensor([local_ind_S_zero_ind[0].shape[0]])))
+
+            # Sample one zero-edge per local B
+            rand_n = torch.rand(ind_b_tent_local.shape[0], device=device)
+            pick = group_starts + ((group_ends - group_starts) * rand_n).to(dtyp)
+
+            # Candidate A per local B row
+            ind_a_tent = local_ind_S_zero_ind[1][pick]
+
+            # Deduplicate A; select aligned local B rows
+            ind_a_push, tent_ind = unique(ind_a_tent, input_sorted=False)
+            ind_b_push_local = ind_b_tent_local[tent_ind]
+
+            # Convert selected local B rows to global B ids only now
+            ind_b_push = ind_b_free[ind_b_push_local]
+            
+            ind_release = torch.nonzero(Ma[ind_a_push] != -1, as_tuple=True)[0]
+            edges_released = (Ma[ind_a_push][ind_release], ind_a_push[ind_release])
+            
+            f -= len(ind_a_push)-len(ind_release)
+            
+            Mb[Ma[edges_released[1]]] = minus_one
+            
+            edges_pushed = (ind_b_push, ind_a_push)
+            Ma[ind_a_push] = ind_b_push
+            Mb[ind_b_push] = ind_a_push
+            yA[ind_a_push] -= one
+            
+            min_slack, _ = torch.min(slack_tile, dim=1)
+            min_slack_ind = torch.where(min_slack!=0)[0]
+            ind_b_not_pushed = ind_b_free[min_slack_ind]
+            yB[ind_b_not_pushed] += min_slack[min_slack_ind]
         
         iteration += 1
     

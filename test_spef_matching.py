@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from scipy.spatial.distance import cdist
 from matching import matching_torch_v1
-from spef_matching import spef_matching_torch
+from spef_matching import spef_matching_2
 
 def test_matching_algorithms():
     # Set parameters
