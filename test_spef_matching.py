@@ -40,7 +40,7 @@ def test_matching_algorithms():
     
     # Run SPEF matching
     print("\nRunning spef_matching_torch...")
-    spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_torch(xa, xb, C, k, delta, device)
+    spef_Mb, spef_yA, spef_yB, spef_cost, spef_iteration = spef_matching_2(xa, xb, C, k, delta, device)
     print(f"SPEF matching completed in {spef_iteration} iterations")
     print(f"SPEF matching cost: {spef_cost.item():.4f}")
     

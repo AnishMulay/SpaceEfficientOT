@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from cuda_deque import CudaDeque
+from scipy.spatial.distance import cdist
 
 def unique(x, input_sorted = False):
     unique, inverse_ind, unique_count = torch.unique(x, return_inverse=True, return_counts=True)
@@ -127,8 +128,9 @@ def spef_matching_torch(
     
     xA_cpu = xA.cpu().float()
     xB_cpu = xB.cpu().float()
-    matched_pairs_cost = torch.sum((xA_cpu - xB_cpu[Mb])**2, dim=1)
-    matching_cost = torch.sum(matched_pairs_cost)
+    W_cpu = cdist(xB_cpu.numpy(), xA_cpu.numpy(), 'sqeuclidean')
+    W_tensor = torch.tensor(W_cpu, dtype=torch.float32)
+    matching_cost = torch.sum(W_tensor[torch.arange(m), Mb])
 
     return Mb, yA, yB, matching_cost, iteration
 
@@ -227,7 +229,8 @@ def spef_matching_2(
     
     xA_cpu = xA.cpu().float()
     xB_cpu = xB.cpu().float()
-    matched_pairs_cost = torch.sum((xA_cpu - xB_cpu[Mb])**2, dim=1)
-    matching_cost = torch.sum(matched_pairs_cost)
+    W_cpu = cdist(xB_cpu.numpy(), xA_cpu.numpy(), 'sqeuclidean')
+    W_tensor = torch.tensor(W_cpu, dtype=torch.float32)
+    matching_cost = torch.sum(W_tensor[torch.arange(m), Mb])
 
     return Mb, yA, yB, matching_cost, iteration
