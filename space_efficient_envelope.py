@@ -397,7 +397,7 @@ def main():
     args = parser.parse_args()
 
     # Parse lists
-    args.dims = [int(x.strip()) for x in args.dims.split(",") if x.strip()]
+    args.dims = [int(x.strip()) for x in args.dims.split(",") if x.strip()][0]
     args.ks = [int(x.strip()) for x in args.ks.split(",") if x.strip()]
 
     device = device_from_arg(args.device)
