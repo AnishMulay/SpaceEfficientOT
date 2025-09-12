@@ -152,7 +152,7 @@ def spef_matching_torch(
 
     # Streaming per-pair sqeuclidean in float64 (no full matrix)
     matching_cost = np.add.reduce(
-        (sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])),
+        [sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])],
         dtype=np.float64
     )
     matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
@@ -262,7 +262,7 @@ def spef_matching_2(
 
     # Streaming per-pair sqeuclidean in float64 (no full matrix)
     matching_cost = np.add.reduce(
-        (sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])),
+        [sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])],
         dtype=np.float64
     )
     matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
