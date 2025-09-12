@@ -147,9 +147,8 @@ def spef_matching_torch(
     
     xA_cpu = xA.cpu().float()
     xB_cpu = xB.cpu().float()
-    W_cpu = cdist(xB_cpu.numpy(), xA_cpu.numpy(), 'sqeuclidean')
-    W_tensor = torch.tensor(W_cpu, dtype=torch.float32)
-    matching_cost = torch.sum(W_tensor[torch.arange(m), Mb])
+    matched_costs = torch.sum((xB_cpu - xA_cpu[Mb])**2, dim=1)
+    matching_cost = torch.sum(matched_costs)
 
     return Mb, yA, yB, matching_cost, iteration
 
@@ -251,8 +250,7 @@ def spef_matching_2(
     
     xA_cpu = xA.cpu().float()
     xB_cpu = xB.cpu().float()
-    W_cpu = cdist(xB_cpu.numpy(), xA_cpu.numpy(), 'sqeuclidean')
-    W_tensor = torch.tensor(W_cpu, dtype=torch.float32)
-    matching_cost = torch.sum(W_tensor[torch.arange(m), Mb])
+    matched_costs = torch.sum((xB_cpu - xA_cpu[Mb])**2, dim=1)
+    matching_cost = torch.sum(matched_costs)
 
     return Mb, yA, yB, matching_cost, iteration
