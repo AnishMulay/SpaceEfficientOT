@@ -145,10 +145,17 @@ def spef_matching_torch(
             Mb[ind_b] = ind_a
             Ma[ind_a] = ind_b
     
-    xA_cpu = xA.cpu().float()
-    xB_cpu = xB.cpu().float()
-    matched_costs = torch.sum((xB_cpu - xA_cpu[Mb])**2, dim=1)
-    matching_cost = torch.sum(matched_costs)
+    from scipy.spatial.distance import sqeuclidean
+    xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
+    xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
+    mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
+
+    # Streaming per-pair sqeuclidean in float64 (no full matrix)
+    matching_cost = np.add.reduce(
+        (sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])),
+        dtype=np.float64
+    )
+    matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
 
     return Mb, yA, yB, matching_cost, iteration
 
@@ -248,9 +255,16 @@ def spef_matching_2(
             Mb[ind_b] = ind_a
             Ma[ind_a] = ind_b
     
-    xA_cpu = xA.cpu().float()
-    xB_cpu = xB.cpu().float()
-    matched_costs = torch.sum((xB_cpu - xA_cpu[Mb])**2, dim=1)
-    matching_cost = torch.sum(matched_costs)
+    from scipy.spatial.distance import sqeuclidean
+    xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
+    xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
+    mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
+
+    # Streaming per-pair sqeuclidean in float64 (no full matrix)
+    matching_cost = np.add.reduce(
+        (sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])),
+        dtype=np.float64
+    )
+    matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
 
     return Mb, yA, yB, matching_cost, iteration
