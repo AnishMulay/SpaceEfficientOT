@@ -32,6 +32,20 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
     xb = torch.rand(n, d, device=device)
 
     # --------------------------
+    # Calculate shared C parameter
+    # --------------------------
+    try:
+        # Calculate C using space-efficient method (random B point)
+        random_b_idx = torch.randint(0, n, (1,), device=device)
+        random_b_point = xb[random_b_idx]
+        distances = torch.sum((xa - random_b_point)**2, dim=1)
+        C = torch.max(distances) * 2
+        print(f"Shared C parameter: {float(C):.4f}")
+    except Exception as e:
+        print(f"Failed to calculate C parameter: {str(e)}")
+        return
+
+    # --------------------------
     # Original algorithm (A)
     # --------------------------
     print("\nORIGINAL ALGORITHM RESULTS:")
@@ -41,8 +55,8 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         xa_cpu = xa.detach().cpu().numpy()
         xb_cpu = xb.detach().cpu().numpy()
         W = cdist(xb_cpu, xa_cpu, "sqeuclidean")
-        W_tensor = torch.tensor(W, device=device, dtype=torch.float32)
-        C = torch.tensor(W.max(), device=device, dtype=torch.float32)
+        W_normalized = W / float(C)  # Normalize cost matrix using shared C
+        W_tensor = torch.tensor(W_normalized, device=device, dtype=torch.float32)
 
         measure_peak_reset(device)
         t0 = time.perf_counter()
@@ -73,15 +87,10 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
     print("\nSPACE-EFFICIENT ALGORITHM RESULTS:")
     print("-" * 40)
     try:
-        # Calculate C using random B point method
-        random_b_idx = torch.randint(0, n, (1,), device=device)
-        random_b_point = xb[random_b_idx]
-        distances = torch.sum((xa - random_b_point)**2, dim=1)
-        C_spef = torch.max(distances) * 2
 
         measure_peak_reset(device)
         t0 = time.perf_counter()
-        Mb2, yA2, yB2, cost2, iter2 = spef_matching_2(xa, xb, C_spef, k, delta, device)
+        Mb2, yA2, yB2, cost2, iter2 = spef_matching_2(xa, xb, C, k, delta, device)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t1 = time.perf_counter()
