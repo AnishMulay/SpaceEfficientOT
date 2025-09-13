@@ -56,11 +56,12 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         xb_cpu = xb.detach().cpu().numpy()
         W = cdist(xb_cpu, xa_cpu, "sqeuclidean")
         W_normalized = W / float(C)  # Normalize cost matrix using shared C
+        C_for_algorithm = torch.tensor(W_normalized.max(), device=device, dtype=torch.float32)  # Recalculate C from normalized matrix
         W_tensor = torch.tensor(W_normalized, device=device, dtype=torch.float32)
 
         measure_peak_reset(device)
         t0 = time.perf_counter()
-        Mb1, yA1, yB1, cost1, iter1 = matching_torch_v1(W_tensor, C, delta, device)
+        Mb1, yA1, yB1, cost1, iter1 = matching_torch_v1(W_tensor, C_for_algorithm, delta, device)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t1 = time.perf_counter()
