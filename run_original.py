@@ -59,4 +59,7 @@ print(f"\nRESULTS:")
 print(f"Runtime: {runtime:.4f} s")
 print(f"GPU memory: {mem_mb:.2f} MB")
 print(f"Iterations: {int(iterations)}")
+sqrt_cost = float(cost) ** 0.5
 print(f"Matching cost: {float(cost):.4f}")
+print(f"Sqrt matching cost: {sqrt_cost:.4f}")
+print(f"Sqrt matching cost / n: {sqrt_cost / n:.4f}")

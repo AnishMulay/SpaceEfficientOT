@@ -3,6 +3,107 @@ import torch
 from cuda_deque import CudaDeque
 from scipy.spatial.distance import cdist
 
+def feasibility_check_full(
+    xA,
+    xB,
+    Mb,
+    Ma,
+    yA,
+    yB,
+    delta,
+    device="cpu",
+    max_examples=10
+):
+    """
+    Full-matrix feasibility checker (debug-only, not space-efficient).
+
+    Conditions checked (paper's ε-feasible with ε mapped to integer 1 under scaling):
+      - For all edges (b,a) not necessarily in M: yA[a] + yB[b] <= C[b,a] + 1
+      - For matched edges (b, Mb[b]): yA[Mb[b]] + yB[b] == C[b, Mb[b]]
+    Also reports strict violations with +0, min slack, reciprocity, duplicates, and sample edges.
+
+    Returns a dict report and prints a one-line summary.
+    """
+    with torch.no_grad():
+        dtyp = torch.int64
+
+        # Move to device and dtypes
+        xA = xA.to(device=device)
+        xB = xB.to(device=device)
+        yA = yA.to(device=device, dtype=dtyp)
+        yB = yB.to(device=device, dtype=dtyp)
+        Mb = Mb.to(device=device, dtype=dtyp)
+        Ma = Ma.to(device=device, dtype=dtyp)
+
+        m = xB.shape[0]
+        n = xA.shape[0]
+
+        # Full integerized cost matrix: C[b,a] = floor(3 * ||xB[b]-xA[a]||^2 / delta)
+        xb2 = (xB * xB).sum(dim=1, keepdim=True)       # [m,1]
+        xa2 = (xA * xA).sum(dim=1, keepdim=True).T     # [1,n]
+        C_float = xb2 + xa2 - 2.0 * (xB @ xA.T)        # [m,n]
+        C = torch.floor((3.0 * C_float) / float(delta)).to(dtyp)  # [m,n]
+
+        # Broadcasted dual sum Y[b,a] = yA[a] + yB[b]
+        Y = yA.unsqueeze(0) + yB.unsqueeze(1)          # [m,n] int64
+
+        # Slack matrix S = C - Y
+        S = C - Y
+
+        # Violations
+        # Strict feasibility: Y <= C  (S >= 0)
+        strict_viol_mask = (Y > C)
+        strict_viol = int(strict_viol_mask.sum().item())
+
+        # ε-feasibility per paper (ε maps to +1): Y <= C + 1  (S >= -1)
+        lax_viol_mask = (Y > (C + 1))
+        lax_viol = int(lax_viol_mask.sum().item())
+
+        min_slack = int(S.min().item())
+
+        # Matched-edge tightness: Y[b, Mb[b]] == C[b, Mb[b]]  (S[b, Mb[b]] == 0)
+        # Only check matched points (Mb[b] != -1)
+        matched_mask = (Mb != -1)
+        matched_rows = torch.where(matched_mask)[0]
+        matched_cols = Mb[matched_mask]
+        sum_y_matched = yA.index_select(0, matched_cols) + yB.index_select(0, matched_rows)
+        c_matched = C[matched_rows, matched_cols]
+        tight_mask = (sum_y_matched == c_matched)
+        non_tight_matched = int((~tight_mask).sum().item())
+
+        # Matching integrity diagnostics
+        dup_A = int(m - torch.unique(Mb).numel())      # duplicates on A side
+        reciprocity_ok = bool(torch.all(Ma.index_select(0, matched_cols) == matched_rows))
+
+        # Example violating edges for debugging (ε-feasibility)
+        examples = []
+        if lax_viol > 0:
+            bi, aj = torch.nonzero(lax_viol_mask, as_tuple=True)
+            take = min(max_examples, bi.shape)
+            for t in range(take):
+                b = int(bi[t].item()); a = int(aj[t].item())
+                examples.append((b, a, int(S[b, a].item())))  # negative slack values
+
+        report = {
+            "min_slack": min_slack,                # minimum C-Y over all edges
+            "strict_violations": strict_viol,      # count where Y > C
+            "epsilon_violations": lax_viol,        # count where Y > C+1
+            "non_tight_matched": non_tight_matched,
+            "dup_A": dup_A,
+            "reciprocity_ok": reciprocity_ok,
+            "examples": examples,                  # list of (b,a, slack) with slack < -1
+        }
+
+        print(
+            f"[feas] min_slack={min_slack}, "
+            f"strict_viol={strict_viol}, "
+            f"eps_viol={lax_viol}, "
+            f"non_tight_matched={non_tight_matched}, "
+            f"dup_A={dup_A}, reciprocity_ok={reciprocity_ok}"
+        )
+
+        return report
+
 def unique(x, input_sorted = False):
     unique, inverse_ind, unique_count = torch.unique(x, return_inverse=True, return_counts=True)
     unique_ind = unique_count.cumsum(0)
@@ -242,11 +343,18 @@ def spef_matching_2(
         
         iteration += 1
     
+    ## print number of free points
+    free_b_count = torch.sum(Mb == minus_one).item()
+    print(f"Free points of b: {free_b_count}")
+
     yA = yA.cpu().detach()   
     yB = yB.cpu().detach()
     Ma = Ma.cpu().detach()
     Mb = Mb.cpu().detach()
     
+    ## check dual weights
+    feasibility_check_full(xA, xB, Mb, Ma, yA, yB, delta)
+
     ind_a = 0
     for ind_b in range(m):
         if Mb[ind_b] == -1:
