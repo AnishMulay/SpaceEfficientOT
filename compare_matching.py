@@ -70,15 +70,14 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         runtime = t1 - t0
         mem_mb = peak_bytes / (1024**2)
         thr = n / runtime if runtime > 0 else float("inf")
-        sqrt_cost = float(cost1) ** 0.5
+        cost_per_n = float(cost1) / n
 
         print(f"Runtime: {runtime:.4f} s")
         print(f"Peak GPU memory: {mem_mb:.2f} MB")
         print(f"Iterations: {int(iter1)}")
         print(f"Throughput: {thr:.0f} points/s")
         print(f"Matching cost: {float(cost1):.4f}")
-        print(f"Sqrt matching cost: {sqrt_cost:.4f}")
-        print(f"Sqrt matching cost / n: {sqrt_cost / n:.4f}")
+        print(f"Matching cost / n: {cost_per_n:.8f}")
     except Exception as e:
         print(f"Original algorithm failed: {str(e)}")
 
@@ -100,15 +99,14 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         runtime = t1 - t0
         mem_mb = peak_bytes / (1024**2)
         thr = n / runtime if runtime > 0 else float("inf")
-        sqrt_cost = float(cost2) ** 0.5
+        cost_per_n = float(cost2) / n
 
         print(f"Runtime: {runtime:.4f} s")
         print(f"Peak GPU memory: {mem_mb:.2f} MB")
         print(f"Iterations: {int(iter2)}")
         print(f"Throughput: {thr:.0f} points/s")
         print(f"Matching cost: {float(cost2):.4f}")
-        print(f"Sqrt matching cost: {sqrt_cost:.4f}")
-        print(f"Sqrt matching cost / n: {sqrt_cost / n:.4f}")
+        print(f"Matching cost / n: {cost_per_n:.8f}")
     except Exception as e:
         print(f"Space-efficient algorithm failed: {str(e)}")
 
