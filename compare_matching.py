@@ -31,17 +31,16 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
     xa = torch.rand(n, d, device=device)
     xb = torch.rand(n, d, device=device)
 
-    # Calculate cost matrix for original algorithm (baseline uses dense W)
-    xa_cpu = xa.detach().cpu().numpy()
-    xb_cpu = xb.detach().cpu().numpy()
-    W = cdist(xb_cpu, xa_cpu, "sqeuclidean")
-
     # --------------------------
     # Original algorithm (A)
     # --------------------------
     print("\nORIGINAL ALGORITHM RESULTS:")
     print("-" * 40)
     try:
+        # Calculate cost matrix for original algorithm (baseline uses dense W)
+        xa_cpu = xa.detach().cpu().numpy()
+        xb_cpu = xb.detach().cpu().numpy()
+        W = cdist(xb_cpu, xa_cpu, "sqeuclidean")
         W_tensor = torch.tensor(W, device=device, dtype=torch.float32)
         C = torch.tensor(W.max(), device=device, dtype=torch.float32)
 
@@ -56,21 +55,17 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         runtime = t1 - t0
         mem_mb = peak_bytes / (1024**2)
         thr = n / runtime if runtime > 0 else float("inf")
+        sqrt_cost = float(cost1) ** 0.5
 
         print(f"Runtime: {runtime:.4f} s")
         print(f"Peak GPU memory: {mem_mb:.2f} MB")
         print(f"Iterations: {int(iter1)}")
         print(f"Throughput: {thr:.0f} points/s")
         print(f"Matching cost: {float(cost1):.4f}")
+        print(f"Sqrt matching cost: {sqrt_cost:.4f}")
+        print(f"Sqrt matching cost / n: {sqrt_cost / n:.4f}")
     except Exception as e:
-        # Print only the error message
-        print(str(e))
-
-    # Proactively drop references
-    try:
-        del W_tensor, C, Mb1, yA1, yB1
-    except:
-        pass
+        print(f"Original algorithm failed: {str(e)}")
 
     # --------------------------
     # Space-efficient algorithm (B)
@@ -78,8 +73,11 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
     print("\nSPACE-EFFICIENT ALGORITHM RESULTS:")
     print("-" * 40)
     try:
-        # Keep the function signature unchanged; use same C scale as baseline for comparability
-        C_spef = torch.tensor(W.max(), device=device, dtype=torch.float32)
+        # Calculate C using random B point method
+        random_b_idx = torch.randint(0, n, (1,), device=device)
+        random_b_point = xb[random_b_idx]
+        distances = torch.sum((xa - random_b_point)**2, dim=1)
+        C_spef = torch.max(distances) * 2
 
         measure_peak_reset(device)
         t0 = time.perf_counter()
@@ -92,15 +90,17 @@ def run_comparison(d, k, n=10000, delta=0.01, seed=42):
         runtime = t1 - t0
         mem_mb = peak_bytes / (1024**2)
         thr = n / runtime if runtime > 0 else float("inf")
+        sqrt_cost = float(cost2) ** 0.5
 
         print(f"Runtime: {runtime:.4f} s")
         print(f"Peak GPU memory: {mem_mb:.2f} MB")
         print(f"Iterations: {int(iter2)}")
         print(f"Throughput: {thr:.0f} points/s")
         print(f"Matching cost: {float(cost2):.4f}")
+        print(f"Sqrt matching cost: {sqrt_cost:.4f}")
+        print(f"Sqrt matching cost / n: {sqrt_cost / n:.4f}")
     except Exception as e:
-        # Print only the error message
-        print(str(e))
+        print(f"Space-efficient algorithm failed: {str(e)}")
 
     print("\nTest completed!")
 
