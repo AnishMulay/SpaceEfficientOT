@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from cuda_deque import CudaDeque
 from scipy.spatial.distance import cdist
+from scipy.spatial.distance import sqeuclidean
 
 def feasibility_check_full(
     xA,
@@ -38,11 +39,12 @@ def feasibility_check_full(
         m = xB.shape[0]
         n = xA.shape[0]
 
-        # Full integerized cost matrix: C[b,a] = floor(3 * ||xB[b]-xA[a]||^2 / delta)
+        # Full integerized cost matrix: C[b,a] = floor(3 * ||xB[b]-xA[a]||^2 / (C * delta))
         xb2 = (xB * xB).sum(dim=1, keepdim=True)       # [m,1]
         xa2 = (xA * xA).sum(dim=1, keepdim=True).T     # [1,n]
         C_float = xb2 + xa2 - 2.0 * (xB @ xA.T)        # [m,n]
-        C = torch.floor((3.0 * C_float) / float(delta)).to(dtyp)  # [m,n]
+        C_max = torch.max(C_float)  # Get the maximum cost for normalization
+        C = torch.floor((3.0 * C_float / C_max) / float(delta)).to(dtyp)  # [m,n]
 
         # Broadcasted dual sum Y[b,a] = yA[a] + yB[b]
         Y = yA.unsqueeze(0) + yB.unsqueeze(1)          # [m,n] int64
@@ -121,6 +123,7 @@ def compute_slack_tile(
     yA, 
     yB, 
     delta,
+    C,
     slack_tile=None
 ):
     current_k = len(idxB)
@@ -135,7 +138,7 @@ def compute_slack_tile(
         xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
         cross = xb @ xA.T                                              # [K,N]
         w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
-        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
+        c_tile = torch.floor((3.0*w_tile/C)/float(delta))              # [K,N] float
         c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
         slack_view.copy_(c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1))
         return slack_view                                              # [current_k,N] int64
@@ -146,7 +149,7 @@ def compute_slack_tile(
         xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
         cross = xb @ xA.T                                              # [K,N]
         w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
-        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
+        c_tile = torch.floor((3.0*w_tile/C)/float(delta))              # [K,N] float
         c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
         slack = c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1)
         return slack                                                   # [K,N] int64
@@ -190,7 +193,7 @@ def spef_matching_torch(
 
     while f > f_threshold:
         ind_b_free = dq.pop_front(k)
-        slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta)
+        slack_tile = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, C)
         local_ind_S_zero_ind = torch.where(slack_tile == 0)  # (rows in 0..K-1, cols in 0..N-1)
 
         # Group by local B rows (tile-local), exactly mirroring matching.py semantics
@@ -246,7 +249,6 @@ def spef_matching_torch(
             Mb[ind_b] = ind_a
             Ma[ind_a] = ind_b
     
-    from scipy.spatial.distance import sqeuclidean
     xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
     xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
     mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
@@ -303,7 +305,7 @@ def spef_matching_2(
             end_idx = min(start_idx + k, len(ind_b_all_free))
             ind_b_free = ind_b_all_free[start_idx:end_idx]
             
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile)
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, C, slack_tile)
             local_ind_S_zero_ind = torch.where(slack_tile_used == 0)
 
             # Group by local B rows (tile-local), exactly mirroring matching.py semantics
@@ -342,18 +344,11 @@ def spef_matching_2(
             yB[ind_b_not_pushed] += min_slack[min_slack_ind]
         
         iteration += 1
-    
-    ## print number of free points
-    free_b_count = torch.sum(Mb == minus_one).item()
-    print(f"Free points of b: {free_b_count}")
 
     yA = yA.cpu().detach()   
     yB = yB.cpu().detach()
     Ma = Ma.cpu().detach()
     Mb = Mb.cpu().detach()
-    
-    ## check dual weights
-    feasibility_check_full(xA, xB, Mb, Ma, yA, yB, delta)
 
     ind_a = 0
     for ind_b in range(m):
@@ -363,7 +358,6 @@ def spef_matching_2(
             Mb[ind_b] = ind_a
             Ma[ind_a] = ind_b
     
-    from scipy.spatial.distance import sqeuclidean
     xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
     xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
     mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
