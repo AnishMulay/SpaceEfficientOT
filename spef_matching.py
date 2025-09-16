@@ -6,11 +6,11 @@ from scipy.spatial.distance import cdist
 from scipy.spatial.distance import sqeuclidean
 
 # Compiled slack kernel for fused computation
-def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, delta):
+def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, C, delta):
     """Fused slack computation: w = xb2 + xa2 - 2*(xb @ xAT), then scale/floor/cast, then broadcast subtract"""
     xb2 = (xb * xb).sum(dim=1, keepdim=True)  # [K,1]
     w = xb2 + xa2_cached - 2.0 * (xb @ xAT)   # [K,N]
-    scaled = (3.0 * w) / float(delta)         # [K,N]
+    scaled = (3.0 * w) / (C.to(w.dtype) * float(delta))  # [K,N]
     c_tile = torch.floor(scaled).to(torch.int64)  # [K,N]
     return c_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)  # [K,N]
 
@@ -133,6 +133,7 @@ def compute_slack_tile(
     xB, 
     yA, 
     yB, 
+    C,
     delta,
     slack_tile=None,
     tile_times=None,
@@ -149,7 +150,7 @@ def compute_slack_tile(
         yB_idx = yB.index_select(0, idxB)                 # [K]
         
         # Call compiled fused kernel - dynamic=True handles varying K
-        slack_int64 = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, delta)
+        slack_int64 = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta)
         slack_view.copy_(slack_int64)
         
         return slack_view  # [current_k,N] int64
@@ -159,7 +160,7 @@ def compute_slack_tile(
         yB_idx = yB.index_select(0, idxB)                 # [K]
         
         # Call compiled fused kernel - dynamic=True handles varying K
-        slack = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, delta)
+        slack = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta)
         
         return slack  # [K,N] int64
 
@@ -333,7 +334,7 @@ def spef_matching_2(
                 start_event.record()
             else:
                 t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached)
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, C, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached)
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()

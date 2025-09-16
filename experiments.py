@@ -41,9 +41,9 @@ def run_experiment(n, delta, d, k):
     
     # Calculate C using space-efficient method
     random_b_idx = torch.randint(0, n, (1,), device=DEVICE)
-    random_b_point = xb[random_b_idx]
-    distances = torch.sum((xa - random_b_point)**2, dim=1)
-    C = torch.max(distances) * 2
+    random_b_point = xb[random_b_idx]  # [1, d]
+    dists = torch.cdist(random_b_point, xa)  # [1, n], Euclidean
+    C = dists.max() ** 2  # scalar tensor on DEVICE
     
     # Run space-efficient algorithm
     if DEVICE.type == "cuda":
