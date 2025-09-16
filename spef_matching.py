@@ -123,19 +123,30 @@ def compute_slack_tile(
     yA, 
     yB, 
     delta,
-    slack_tile=None
+    slack_tile=None,
+    xAT=None,
+    xa2_cached=None,
+    xb2_all=None
 ):
     current_k = len(idxB)
     
     if slack_tile is not None and current_k <= slack_tile.shape[0]:
-        # Reuse pre-allocated tensor
+        # Reuse pre-allocated tensor (fully overwritten by copy_)
         slack_view = slack_tile[:current_k]
-        slack_view.zero_()
         
         xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
-        xb2 = (xb*xb).sum(dim=1, keepdim=True)                         # [K,1]
-        xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
-        cross = xb @ xA.T                                              # [K,N]
+        if xb2_all is not None:
+            xb2 = xb2_all.index_select(0, idxB)                        # [K,1]
+        else:
+            xb2 = (xb*xb).sum(dim=1, keepdim=True)                     # [K,1]
+        if xa2_cached is not None:
+            xa2 = xa2_cached                                           # [1,N]
+        else:
+            xa2 = (xA*xA).sum(dim=1, keepdim=True).T                   # [1,N]
+        if xAT is not None:
+            cross = xb @ xAT                                           # [K,N]
+        else:
+            cross = xb @ xA.T                                          # [K,N]
         w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
         c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
         c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
@@ -144,9 +155,18 @@ def compute_slack_tile(
     else:
         # Original allocation for fallback
         xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
-        xb2 = (xb*xb).sum(dim=1, keepdim=True)                         # [K,1]
-        xa2 = (xA*xA).sum(dim=1, keepdim=True).T                       # [1,N]
-        cross = xb @ xA.T                                              # [K,N]
+        if xb2_all is not None:
+            xb2 = xb2_all.index_select(0, idxB)                        # [K,1]
+        else:
+            xb2 = (xb*xb).sum(dim=1, keepdim=True)                     # [K,1]
+        if xa2_cached is not None:
+            xa2 = xa2_cached                                           # [1,N]
+        else:
+            xa2 = (xA*xA).sum(dim=1, keepdim=True).T                   # [1,N]
+        if xAT is not None:
+            cross = xb @ xAT                                           # [K,N]
+        else:
+            cross = xb @ xA.T                                          # [K,N]
         w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
         c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
         c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
@@ -292,6 +312,11 @@ def spef_matching_2(
     f_threshold = m*delta/C
     torch.manual_seed(seed)
     
+    # Compute one-time caches
+    xAT = xA.T.contiguous()
+    xa2_cached = (xA * xA).sum(dim=1, keepdim=True).T
+    xb2_all = (xB * xB).sum(dim=1, keepdim=True)
+    
     # Pre-allocate slack tile for reuse
     slack_tile = torch.zeros(k, n, device=device, dtype=torch.int64)
     
@@ -299,6 +324,11 @@ def spef_matching_2(
     slack_compute_total = 0.0
     tile_updates_total = 0.0
     inner_loops_count = 0
+    
+    # CUDA events for GPU timing (no CPU sync)
+    if device.type == "cuda":
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
 
     while f > f_threshold:
         # Get all free B points
@@ -311,16 +341,23 @@ def spef_matching_2(
             
             # Time slack tile compute
             if device.type == "cuda":
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile)
+                start_event.record()
+            else:
+                t0 = time.perf_counter()
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached, xb2_all=xb2_all)
             if device.type == "cuda":
+                end_event.record()
                 torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            slack_compute_total += t1 - t0
+                slack_compute_total += start_event.elapsed_time(end_event) / 1000.0
+            else:
+                t1 = time.perf_counter()
+                slack_compute_total += t1 - t0
             
             # Time subsequent per-tile updates
-            t2 = time.perf_counter()
+            if device.type == "cuda":
+                start_event.record()
+            else:
+                t2 = time.perf_counter()
             local_ind_S_zero_ind = torch.where(slack_tile_used == 0)
 
             # Group by local B rows (tile-local), exactly mirroring matching.py semantics
@@ -358,9 +395,12 @@ def spef_matching_2(
             ind_b_not_pushed = ind_b_free[min_slack_ind]
             yB[ind_b_not_pushed] += min_slack[min_slack_ind]
             if device.type == "cuda":
+                end_event.record()
                 torch.cuda.synchronize()
-            t3 = time.perf_counter()
-            tile_updates_total += t3 - t2
+                tile_updates_total += start_event.elapsed_time(end_event) / 1000.0
+            else:
+                t3 = time.perf_counter()
+                tile_updates_total += t3 - t2
             inner_loops_count += 1
         
         iteration += 1
