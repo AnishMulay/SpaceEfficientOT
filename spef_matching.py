@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import time
 from cuda_deque import CudaDeque
 from scipy.spatial.distance import cdist
 from scipy.spatial.distance import sqeuclidean
@@ -293,6 +294,11 @@ def spef_matching_2(
     
     # Pre-allocate slack tile for reuse
     slack_tile = torch.zeros(k, n, device=device, dtype=torch.int64)
+    
+    # Timing metrics
+    slack_compute_total = 0.0
+    tile_updates_total = 0.0
+    inner_loops_count = 0
 
     while f > f_threshold:
         # Get all free B points
@@ -303,7 +309,18 @@ def spef_matching_2(
             end_idx = min(start_idx + k, len(ind_b_all_free))
             ind_b_free = ind_b_all_free[start_idx:end_idx]
             
+            # Time slack tile compute
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            slack_compute_total += t1 - t0
+            
+            # Time subsequent per-tile updates
+            t2 = time.perf_counter()
             local_ind_S_zero_ind = torch.where(slack_tile_used == 0)
 
             # Group by local B rows (tile-local), exactly mirroring matching.py semantics
@@ -340,6 +357,11 @@ def spef_matching_2(
             min_slack_ind = torch.where(min_slack!=0)[0]
             ind_b_not_pushed = ind_b_free[min_slack_ind]
             yB[ind_b_not_pushed] += min_slack[min_slack_ind]
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t3 = time.perf_counter()
+            tile_updates_total += t3 - t2
+            inner_loops_count += 1
         
         iteration += 1
 
@@ -348,6 +370,8 @@ def spef_matching_2(
     Ma = Ma.cpu().detach()
     Mb = Mb.cpu().detach()
 
+    # Time final matching fill
+    t4 = time.perf_counter()
     ind_a = 0
     for ind_b in range(m):
         if Mb[ind_b] == -1:
@@ -355,7 +379,11 @@ def spef_matching_2(
                 ind_a += 1
             Mb[ind_b] = ind_a
             Ma[ind_a] = ind_b
+    t5 = time.perf_counter()
+    final_fill_time = t5 - t4
     
+    # Time total matching cost calculation
+    t6 = time.perf_counter()
     xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
     xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
     mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
@@ -366,5 +394,21 @@ def spef_matching_2(
         dtype=np.float64
     )
     matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
+    t7 = time.perf_counter()
+    cost_calc_time = t7 - t6
+    
+    # Compute averages
+    slack_compute_avg = slack_compute_total / inner_loops_count if inner_loops_count > 0 else 0.0
+    tile_updates_avg = tile_updates_total / inner_loops_count if inner_loops_count > 0 else 0.0
+    
+    timing_metrics = {
+        "slack_compute_total": slack_compute_total,
+        "slack_compute_avg": slack_compute_avg,
+        "tile_updates_total": tile_updates_total,
+        "tile_updates_avg": tile_updates_avg,
+        "final_fill_time": final_fill_time,
+        "cost_calc_time": cost_calc_time,
+        "inner_loops_count": inner_loops_count
+    }
 
-    return Mb, yA, yB, matching_cost, iteration
+    return Mb, yA, yB, matching_cost, iteration, timing_metrics

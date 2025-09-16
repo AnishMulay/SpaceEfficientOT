@@ -50,7 +50,7 @@ def run_experiment(n, delta, d, k):
         torch.cuda.synchronize()
     
     t0 = time.perf_counter()
-    Mb, yA, yB, cost, iterations = spef_matching_2(xa, xb, C, k, delta, DEVICE)
+    Mb, yA, yB, cost, iterations, timing_metrics = spef_matching_2(xa, xb, C, k, delta, DEVICE)
     
     if DEVICE.type == "cuda":
         torch.cuda.synchronize()
@@ -70,7 +70,8 @@ def run_experiment(n, delta, d, k):
         "matching_cost": matching_cost,
         "cost_per_n": cost_per_n,
         "iterations": int(iterations),
-        "C": float(C)
+        "C": float(C),
+        "timing_metrics": timing_metrics
     }
     
     print(f"  Runtime: {runtime:.4f}s, Cost: {matching_cost:.4f}, Cost/n: {cost_per_n:.8f}")
