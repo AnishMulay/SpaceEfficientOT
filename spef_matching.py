@@ -5,6 +5,17 @@ from cuda_deque import CudaDeque
 from scipy.spatial.distance import cdist
 from scipy.spatial.distance import sqeuclidean
 
+# Compiled slack kernel for fused computation
+def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, delta):
+    """Fused slack computation: w = xb2 + xa2 - 2*(xb @ xAT), then scale/floor/cast, then broadcast subtract"""
+    xb2 = (xb * xb).sum(dim=1, keepdim=True)  # [K,1]
+    w = xb2 + xa2_cached - 2.0 * (xb @ xAT)   # [K,N]
+    scaled = (3.0 * w) / float(delta)         # [K,N]
+    c_tile = torch.floor(scaled).to(torch.int64)  # [K,N]
+    return c_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)  # [K,N]
+
+_compiled_slack = torch.compile(_slack_kernel, mode='reduce-overhead', dynamic=True)
+
 def feasibility_check_full(
     xA,
     xB,
@@ -126,253 +137,31 @@ def compute_slack_tile(
     slack_tile=None,
     tile_times=None,
     xAT=None,
-    xa2_cached=None,
-    xb2_all=None
+    xa2_cached=None
 ):
     current_k = len(idxB)
-    is_cuda = xA.device.type == 'cuda'
-    
-    if tile_times is not None:
-        if is_cuda:
-            torch.cuda.synchronize()
-        t_start = time.perf_counter()
     
     if slack_tile is not None and current_k <= slack_tile.shape[0]:
-        # Reuse pre-allocated tensor (fully overwritten by copy_)
+        # Reuse pre-allocated tensor - use compiled fused kernel
         slack_view = slack_tile[:current_k]
         
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_idx_select_total_ms'] += (t1 - t0) * 1000
+        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)  # [K,d]
+        yB_idx = yB.index_select(0, idxB)                 # [K]
         
-        if xb2_all is not None:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xb2 = xb2_all.index_select(0, idxB)                        # [K,1]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xb2_total_ms'] += (t1 - t0) * 1000
-        else:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xb2 = (xb*xb).sum(dim=1, keepdim=True)                     # [K,1]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xb2_total_ms'] += (t1 - t0) * 1000
+        # Call compiled fused kernel - dynamic=True handles varying K
+        slack_int64 = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, delta)
+        slack_view.copy_(slack_int64)
         
-        if xa2_cached is not None:
-            xa2 = xa2_cached                                           # [1,N]
-        else:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xa2 = (xA*xA).sum(dim=1, keepdim=True).T                   # [1,N]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xa2_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        if xAT is not None:
-            cross = xb @ xAT                                           # [K,N]
-        else:
-            cross = xb @ xA.T                                          # [K,N]
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_matmul_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_combine_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
-        c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_scale_floor_cast_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        broadcast_sub = c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1)
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_broadcast_sub_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        slack_view.copy_(broadcast_sub)
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_copy_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t_end = time.perf_counter()
-            tile_times['slack_total_tile_total_ms'] += (t_end - t_start) * 1000
-            tile_times['slack_tile_calls'] += 1
-        
-        return slack_view                                              # [current_k,N] int64
+        return slack_view  # [current_k,N] int64
     else:
-        # Original allocation for fallback
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)               # [K,d]
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_idx_select_total_ms'] += (t1 - t0) * 1000
+        # Fallback branch - use compiled fused kernel
+        xb = xB.index_select(0, idxB).to(dtype=xA.dtype)  # [K,d]
+        yB_idx = yB.index_select(0, idxB)                 # [K]
         
-        if xb2_all is not None:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xb2 = xb2_all.index_select(0, idxB)                        # [K,1]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xb2_total_ms'] += (t1 - t0) * 1000
-        else:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xb2 = (xb*xb).sum(dim=1, keepdim=True)                     # [K,1]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xb2_total_ms'] += (t1 - t0) * 1000
+        # Call compiled fused kernel - dynamic=True handles varying K
+        slack = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, delta)
         
-        if xa2_cached is not None:
-            xa2 = xa2_cached                                           # [1,N]
-        else:
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-            xa2 = (xA*xA).sum(dim=1, keepdim=True).T                   # [1,N]
-            if tile_times is not None:
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t1 = time.perf_counter()
-                tile_times['slack_xa2_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        if xAT is not None:
-            cross = xb @ xAT                                           # [K,N]
-        else:
-            cross = xb @ xA.T                                          # [K,N]
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_matmul_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        w_tile = xb2 + xa2 - 2.0*cross                                 # [K,N] float
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_combine_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        c_tile = torch.floor((3.0*w_tile)/float(delta))                # [K,N] float
-        c_tile = c_tile.to(dtype=torch.int64)                          # [K,N] int64
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_scale_floor_cast_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        broadcast_sub = c_tile - yA.unsqueeze(0) - yB.index_select(0, idxB).unsqueeze(1)
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_broadcast_sub_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-        slack = broadcast_sub
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            tile_times['slack_copy_total_ms'] += (t1 - t0) * 1000
-        
-        if tile_times is not None:
-            if is_cuda:
-                torch.cuda.synchronize()
-            t_end = time.perf_counter()
-            tile_times['slack_total_tile_total_ms'] += (t_end - t_start) * 1000
-            tile_times['slack_tile_calls'] += 1
-        
-        return slack                                                   # [K,N] int64
+        return slack  # [K,N] int64
 
 
 def spef_matching_torch(
@@ -513,27 +302,12 @@ def spef_matching_2(
     f_threshold = m*delta/C
     torch.manual_seed(seed)
     
-    # Compute one-time caches
+    # Compute one-time caches for compiled kernel
     xAT = xA.T.contiguous()
     xa2_cached = (xA * xA).sum(dim=1, keepdim=True).T
-    xb2_all = (xB * xB).sum(dim=1, keepdim=True)
     
     # Pre-allocate slack tile for reuse
     slack_tile = torch.zeros(k, n, device=device, dtype=torch.int64)
-    
-    # Initialize timing metrics
-    timing_metrics = {
-        'slack_idx_select_total_ms': 0.0,
-        'slack_xb2_total_ms': 0.0,
-        'slack_xa2_total_ms': 0.0,
-        'slack_matmul_total_ms': 0.0,
-        'slack_combine_total_ms': 0.0,
-        'slack_scale_floor_cast_total_ms': 0.0,
-        'slack_broadcast_sub_total_ms': 0.0,
-        'slack_copy_total_ms': 0.0,
-        'slack_total_tile_total_ms': 0.0,
-        'slack_tile_calls': 0
-    }
     
     # Existing coarse timing metrics
     slack_compute_total = 0.0
@@ -559,7 +333,7 @@ def spef_matching_2(
                 start_event.record()
             else:
                 t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile, tile_times=timing_metrics, xAT=xAT, xa2_cached=xa2_cached, xb2_all=xb2_all)
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached)
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()
@@ -652,24 +426,12 @@ def spef_matching_2(
     t7 = time.perf_counter()
     cost_calc_time = t7 - t6
     
-    # Compute per-tile averages for fine-grained metrics
-    tile_calls = max(timing_metrics['slack_tile_calls'], 1)
-    timing_metrics['slack_idx_select_avg_ms'] = timing_metrics['slack_idx_select_total_ms'] / tile_calls
-    timing_metrics['slack_xb2_avg_ms'] = timing_metrics['slack_xb2_total_ms'] / tile_calls
-    timing_metrics['slack_xa2_avg_ms'] = timing_metrics['slack_xa2_total_ms'] / tile_calls
-    timing_metrics['slack_matmul_avg_ms'] = timing_metrics['slack_matmul_total_ms'] / tile_calls
-    timing_metrics['slack_combine_avg_ms'] = timing_metrics['slack_combine_total_ms'] / tile_calls
-    timing_metrics['slack_scale_floor_cast_avg_ms'] = timing_metrics['slack_scale_floor_cast_total_ms'] / tile_calls
-    timing_metrics['slack_broadcast_sub_avg_ms'] = timing_metrics['slack_broadcast_sub_total_ms'] / tile_calls
-    timing_metrics['slack_copy_avg_ms'] = timing_metrics['slack_copy_total_ms'] / tile_calls
-    timing_metrics['slack_total_tile_avg_ms'] = timing_metrics['slack_total_tile_total_ms'] / tile_calls
-    
-    # Compute averages for existing coarse metrics
+    # Compute averages for coarse metrics
     slack_compute_avg = slack_compute_total / inner_loops_count if inner_loops_count > 0 else 0.0
     tile_updates_avg = tile_updates_total / inner_loops_count if inner_loops_count > 0 else 0.0
     
-    # Add existing coarse metrics to timing_metrics
-    timing_metrics.update({
+    # Timing metrics for external A/B testing
+    timing_metrics = {
         "slack_compute_total": slack_compute_total,
         "slack_compute_avg": slack_compute_avg,
         "tile_updates_total": tile_updates_total,
@@ -677,6 +439,6 @@ def spef_matching_2(
         "final_fill_time": final_fill_time,
         "cost_calc_time": cost_calc_time,
         "inner_loops_count": inner_loops_count
-    })
+    }
 
     return Mb, yA, yB, matching_cost, iteration, timing_metrics
