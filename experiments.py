@@ -176,7 +176,10 @@ def main():
                         save_results(results)
                         print(f" Results saved to {RESULTS_FILE}")
                     except Exception as e:
+                        import traceback
                         print(f" ERROR in GeomLoss n={n}, d={d}: {str(e)}")
+                        print("Full traceback:")
+                        traceback.print_exc()
                     print("-" * 40)
     
     print("All experiments completed!")
