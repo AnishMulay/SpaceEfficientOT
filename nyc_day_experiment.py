@@ -9,30 +9,24 @@ nyc_day_experiment.py  —  NYC Taxi: zone-centroid → Euclidean bipartite buil
     xA:[N,2]  dropoff XY (A/left)
     xB:[N,2]  pickup  XY (B/right)
     tA:[N], tB:[N]  int64 seconds; here tA == tB == pickup_time (per current experiment)
-- Prints counts and a 5-row preview of the bipartite rows.
-- Computes C automatically (like experiments.py) if not provided:
+- Computes C automatically (if not provided) like experiments.py:
     pick 1 random B, compute max Euclidean distance to all A, then square.
-- Calls spef_matching_2(...) from spef_matching_nyc.py (same directory).
-
-Example:
-  python nyc_day_experiment.py \
-    --input ./nyc_data/yellow_tripdata_2014-01.parquet \
-    --zones ./nyc_data/taxi_zones/taxi_zones.shp \
-    --date 2014-01-10 \
-    --n 100000
+- Calls spef_matching_2(...) (imported directly) and prints an experiment-style summary
+  (wall time, cost, iterations, key timing metrics) WITHOUT saving to disk.
 """
 
 import os
 import argparse
 from typing import Tuple, Optional
+import time
 
 import numpy as np
 import pandas as pd
 import torch
 import geopandas as gpd
 
-# Hard-coded: import solver from the same folder
-import spef_matching_nyc as solver
+# Import the matching entrypoint directly (same directory as this script)
+from spef_matching_nyc import spef_matching_2
 
 
 # ---------------------------
@@ -249,14 +243,10 @@ def compute_C_auto(xA: torch.Tensor, xB: torch.Tensor, device: torch.device, see
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
     nB = xB.shape[0]
-    # [1] random index on device
     rb = torch.randint(0, nB, (1,), device=device, generator=gen)
-    # [1, d]
-    bpt = xB.index_select(0, rb)
-    # Euclidean distances [1, nA]
-    dists = torch.cdist(bpt, xA)
-    # Square the max distance -> scalar tensor
-    C = dists.max() ** 2
+    bpt = xB.index_select(0, rb)           # [1, d]
+    dists = torch.cdist(bpt, xA)           # [1, nA]
+    C = dists.max() ** 2                   # scalar tensor
     return C
 
 
@@ -270,7 +260,6 @@ def main():
     ap.add_argument("--date", required=True, help="Single LOCAL date to keep, e.g., 2014-01-10.")
     ap.add_argument("--tz", default="America/New_York", help="Timezone for --date (default: America/New_York).")
     ap.add_argument("--n", type=int, default=None, help="If provided, take only the first n requests after sorting.")
-    # Keep knobs; C is now optional—if omitted, we auto-compute it like experiments.py
     ap.add_argument("--tile_k", type=int, default=4096, help="Tile size (if your solver expects it).")
     ap.add_argument("--C", type=float, default=None, help="Scaling factor. If omitted, compute from data on GPU.")
     ap.add_argument("--delta", type=float, default=1.0, help="delta parameter (as in your solver).")
@@ -326,19 +315,68 @@ def main():
         C_tensor = compute_C_auto(xA, xB, device, args.seed)
         print(f"[info] C (auto, max-dist^2 from one random B): {float(C_tensor):.6g}")
 
-    # ----- Solve (uncomment/comment as needed) -----
-    out = solver.spef_matching_2(
+    # ----- Run solver and print experiment-style summary (no JSON save) -----
+    print("\n[run] spef_matching_2 ...")
+    t0 = time.perf_counter()
+    out = spef_matching_2(
         xA=xA, xB=xB,
         C=C_tensor, k=args.tile_k, delta=args.delta,
         device=device, seed=args.seed,
         tA=tA, tB=tB,
     )
+    t1 = time.perf_counter()
+    wall = t1 - t0
     print("[done] spef_matching_2 finished.")
-    if isinstance(out, dict):
-        summary = {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__) for k, v in out.items()}
-        print("[summary]", summary)
+
+    # --- Robust summary printing (tuple/dict/other)
+    def _preview_vec(name, t, k=10):
+        if isinstance(t, torch.Tensor):
+            td = t.detach().cpu()
+            print(f"  {name}: Tensor(shape={tuple(td.shape)}, dtype={td.dtype}, device={t.device})")
+            n = min(k, td.shape[0])
+            print(f"    head[{n}]:", td[:n].tolist())
+        else:
+            print(f"  {name}: {type(t).__name__}")
+
+    if isinstance(out, tuple) and len(out) == 6:
+        Mb, yA, yB, matching_cost, iteration, metrics = out
+        print("\n[summary]")
+        print(f"  N={N2}, k(tile)={args.tile_k}, delta={args.delta}, seed={args.seed}")
+        print(f"  wall_time_s={wall:.3f}")
+        try:
+            print(f"  matching_cost={float(matching_cost):.6g}")
+        except Exception:
+            print(f"  matching_cost={matching_cost}")
+        print(f"  iterations={iteration}")
+
+        # Key metrics if present
+        if isinstance(metrics, dict):
+            for k in ("slack_compute_total", "slack_compute_avg",
+                      "tile_updates_total", "tile_updates_avg",
+                      "final_fill_time", "cost_calc_time", "inner_loops_count"):
+                if k in metrics:
+                    print(f"  {k}={metrics[k]}")
+
+        # Tiny previews of vectors
+        _preview_vec("Mb (match for B→A)", Mb, k=10)
+        _preview_vec("yA", yA, k=10)
+        _preview_vec("yB", yB, k=10)
+
+    elif isinstance(out, dict):
+        print("\n[summary] dict keys:", list(out.keys()))
+        if "matching_cost" in out:
+            try:
+                print(f"  matching_cost={float(out['matching_cost']):.6g}")
+            except Exception:
+                print(f"  matching_cost={out['matching_cost']}")
+        print(f"  wall_time_s={wall:.3f}")
+        for k in out:
+            if isinstance(out[k], torch.Tensor):
+                _preview_vec(k, out[k], k=10)
     else:
-        print("[summary] return type:", type(out).__name__)
+        print("\n[summary] return type:", type(out).__name__)
+        print("  wall_time_s=", f"{wall:.3f}")
+        print("  value:", out)
 
 
 if __name__ == "__main__":
