@@ -120,12 +120,16 @@ def take_first_n(df: pd.DataFrame, n: int | None) -> pd.DataFrame:
 
 
 def to_epoch_seconds_utc(dt_series: pd.Series) -> np.ndarray:
-    """Convert tz-aware datetime series to int64 UNIX seconds in UTC."""
+    """
+    Convert tz-aware datetime series to int64 UNIX seconds in UTC and
+    return a NumPy array (not a pandas Series).
+    """
     if dt_series.dt.tz is None:
         dt_utc = dt_series.dt.tz_localize("UTC")
     else:
         dt_utc = dt_series.dt.tz_convert("UTC")
-    return (dt_utc.view("int64") // 10**9).astype(np.int64)
+    # Avoid Series.view deprecation; cast then .to_numpy()
+    return ((dt_utc.astype("int64") // 10**9).to_numpy(dtype=np.int64))
 
 
 # ---------------------------
@@ -133,16 +137,15 @@ def to_epoch_seconds_utc(dt_series: pd.Series) -> np.ndarray:
 # ---------------------------
 def load_zone_centroids(zones_path: str) -> dict[int, tuple[float, float]]:
     """
-    Read Taxi Zones shapefile (or any vector file), ensure CRS=EPSG:4326,
-    return dict: LocationID -> (lon, lat) centroid.
+    Read Taxi Zones shapefile, compute centroids in a projected CRS, then
+    transform to EPSG:4326 to get (lon, lat). Return LocationID -> (lon, lat).
     """
     gdf = gpd.read_file(zones_path)
     print(f"[zones] loaded: {zones_path}")
     print(f"[zones] crs: {gdf.crs}")
     print(f"[zones] columns: {list(gdf.columns)}")
     with pd.option_context("display.max_columns", None, "display.width", 160):
-        print("[zones] head:")
-        print(gdf.head(3))
+        print("[zones] head:"); print(gdf.head(3))
 
     # Resolve LocationID column (case-insensitive)
     cmap = {c.lower(): c for c in gdf.columns}
@@ -150,15 +153,22 @@ def load_zone_centroids(zones_path: str) -> dict[int, tuple[float, float]]:
     if not loc_col:
         raise ValueError("Zones file missing 'LocationID' column.")
 
-    # Ensure lon/lat CRS
+    # If CRS is missing, assume 4326; otherwise use the provided CRS
     if gdf.crs is None:
-        # assume EPSG:4326 if missing (most TLC zones are 4326); adjust if you know it's different
         gdf = gdf.set_crs("EPSG:4326", allow_override=True)
-    elif str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
-        gdf = gdf.to_crs("EPSG:4326")
 
-    cents = gdf.geometry.centroid
-    cent_map = {int(idx): (pt.x, pt.y) for idx, pt in zip(gdf[loc_col].astype(int), cents)}
+    # Compute centroids in a projected CRS (good for geometry ops)
+    if gdf.crs.to_epsg() == 4326:
+        # Source is geographic -> project to NYSP 2263 for centroid, then back to 4326
+        gdf_proj = gdf.to_crs("EPSG:2263")
+        cents_local = gdf_proj.geometry.centroid
+        cents_ll = gpd.GeoSeries(cents_local, crs="EPSG:2263").to_crs("EPSG:4326")
+    else:
+        # Source is already projected (your case: EPSG:2263)
+        cents_local = gdf.geometry.centroid
+        cents_ll = gpd.GeoSeries(cents_local, crs=gdf.crs).to_crs("EPSG:4326")
+
+    cent_map = {int(loc): (pt.x, pt.y) for loc, pt in zip(gdf[loc_col].astype(int), cents_ll)}
     return cent_map
 
 
@@ -280,18 +290,18 @@ def main():
         print(f"  {i:4d}  t={int(t5[i])}  B=({xB5[i,0]:.1f},{xB5[i,1]:.1f})  A=({xA5[i,0]:.1f},{xA5[i,1]:.1f})")
 
     # ----- Solve (uncomment when ready) -----
-    out = solver.spef_matching_2(
-        xA=xA, xB=xB,
-        C=args.C, k=args.tile_k, delta=args.delta,
-        device=device, seed=args.seed,
-        tA=tA, tB=tB,
-    )
-    print("[done] spef_matching_2 finished.")
-    if isinstance(out, dict):
-        summary = {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__) for k, v in out.items()}
-        print("[summary]", summary)
-    else:
-        print("[summary] return type:", type(out).__name__)
+    # out = solver.spef_matching_2(
+    #     xA=xA, xB=xB,
+    #     C=args.C, k=args.tile_k, delta=args.delta,
+    #     device=device, seed=args.seed,
+    #     tA=tA, tB=tB,
+    # )
+    # print("[done] spef_matching_2 finished.")
+    # if isinstance(out, dict):
+    #     summary = {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__) for k, v in out.items()}
+    #     print("[summary]", summary)
+    # else:
+    #     print("[summary] return type:", type(out).__name__)
 
 
 if __name__ == "__main__":
