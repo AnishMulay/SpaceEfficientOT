@@ -10,7 +10,16 @@ nyc_day_experiment.py  —  NYC Taxi: zone-centroid → Euclidean bipartite buil
     xB:[N,2]  pickup  XY (B/right)
     tA:[N], tB:[N]  int64 seconds; here tA == tB == pickup_time (per current experiment)
 - Prints counts and a 5-row preview of the bipartite rows.
+- Computes C automatically (like experiments.py) if not provided:
+    pick 1 random B, compute max Euclidean distance to all A, then square.
 - Calls spef_matching_2(...) from spef_matching_nyc.py (same directory).
+
+Example:
+  python nyc_day_experiment.py \
+    --input ./nyc_data/yellow_tripdata_2014-01.parquet \
+    --zones ./nyc_data/taxi_zones/taxi_zones.shp \
+    --date 2014-01-10 \
+    --n 100000
 """
 
 import os
@@ -21,7 +30,6 @@ import numpy as np
 import pandas as pd
 import torch
 import geopandas as gpd
-from shapely.geometry import Point
 
 # Hard-coded: import solver from the same folder
 import spef_matching_nyc as solver
@@ -128,7 +136,6 @@ def to_epoch_seconds_utc(dt_series: pd.Series) -> np.ndarray:
         dt_utc = dt_series.dt.tz_localize("UTC")
     else:
         dt_utc = dt_series.dt.tz_convert("UTC")
-    # Avoid Series.view deprecation; cast then .to_numpy()
     return ((dt_utc.astype("int64") // 10**9).to_numpy(dtype=np.int64))
 
 
@@ -158,13 +165,13 @@ def load_zone_centroids(zones_path: str) -> dict[int, tuple[float, float]]:
         gdf = gdf.set_crs("EPSG:4326", allow_override=True)
 
     # Compute centroids in a projected CRS (good for geometry ops)
-    if gdf.crs.to_epsg() == 4326:
+    if str(gdf.crs).upper().endswith("4326"):
         # Source is geographic -> project to NYSP 2263 for centroid, then back to 4326
         gdf_proj = gdf.to_crs("EPSG:2263")
         cents_local = gdf_proj.geometry.centroid
         cents_ll = gpd.GeoSeries(cents_local, crs="EPSG:2263").to_crs("EPSG:4326")
     else:
-        # Source is already projected (your case: EPSG:2263)
+        # Source is already projected (e.g., EPSG:2263)
         cents_local = gdf.geometry.centroid
         cents_ll = gpd.GeoSeries(cents_local, crs=gdf.crs).to_crs("EPSG:4326")
 
@@ -232,6 +239,28 @@ def build_tensors_from_centroids(df: pd.DataFrame,
 
 
 # ---------------------------
+#  Auto-compute C (like experiments.py)
+# ---------------------------
+def compute_C_auto(xA: torch.Tensor, xB: torch.Tensor, device: torch.device, seed: int) -> torch.Tensor:
+    """
+    Pick 1 random B row, compute max Euclidean distance to all A, then square it.
+    Returns a scalar torch tensor on `device`.
+    """
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed))
+    nB = xB.shape[0]
+    # [1] random index on device
+    rb = torch.randint(0, nB, (1,), device=device, generator=gen)
+    # [1, d]
+    bpt = xB.index_select(0, rb)
+    # Euclidean distances [1, nA]
+    dists = torch.cdist(bpt, xA)
+    # Square the max distance -> scalar tensor
+    C = dists.max() ** 2
+    return C
+
+
+# ---------------------------
 #  Main
 # ---------------------------
 def main():
@@ -241,11 +270,11 @@ def main():
     ap.add_argument("--date", required=True, help="Single LOCAL date to keep, e.g., 2014-01-10.")
     ap.add_argument("--tz", default="America/New_York", help="Timezone for --date (default: America/New_York).")
     ap.add_argument("--n", type=int, default=None, help="If provided, take only the first n requests after sorting.")
-    # Solver knobs you might want to tune:
+    # Keep knobs; C is now optional—if omitted, we auto-compute it like experiments.py
     ap.add_argument("--tile_k", type=int, default=4096, help="Tile size (if your solver expects it).")
-    ap.add_argument("--C", type=int, default=32, help="C parameter (as in your solver).")
+    ap.add_argument("--C", type=float, default=None, help="Scaling factor. If omitted, compute from data on GPU.")
     ap.add_argument("--delta", type=float, default=1.0, help="delta parameter (as in your solver).")
-    ap.add_argument("--seed", type=int, default=1, help="Random seed (if applicable).")
+    ap.add_argument("--seed", type=int, default=1, help="Random seed (used by solver and C auto).")
 
     args = ap.parse_args()
 
@@ -289,19 +318,27 @@ def main():
     for i in range(K):
         print(f"  {i:4d}  t={int(t5[i])}  B=({xB5[i,0]:.1f},{xB5[i,1]:.1f})  A=({xA5[i,0]:.1f},{xA5[i,1]:.1f})")
 
-    # ----- Solve (uncomment when ready) -----
-    # out = solver.spef_matching_2(
-    #     xA=xA, xB=xB,
-    #     C=args.C, k=args.tile_k, delta=args.delta,
-    #     device=device, seed=args.seed,
-    #     tA=tA, tB=tB,
-    # )
-    # print("[done] spef_matching_2 finished.")
-    # if isinstance(out, dict):
-    #     summary = {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__) for k, v in out.items()}
-    #     print("[summary]", summary)
-    # else:
-    #     print("[summary] return type:", type(out).__name__)
+    # ---- C: manual OR auto (experiments.py method) ----
+    if args.C is not None:
+        C_tensor = torch.as_tensor(args.C, device=device, dtype=torch.float32)
+        print(f"[info] C (manual): {float(C_tensor):.6g}")
+    else:
+        C_tensor = compute_C_auto(xA, xB, device, args.seed)
+        print(f"[info] C (auto, max-dist^2 from one random B): {float(C_tensor):.6g}")
+
+    # ----- Solve (uncomment/comment as needed) -----
+    out = solver.spef_matching_2(
+        xA=xA, xB=xB,
+        C=C_tensor, k=args.tile_k, delta=args.delta,
+        device=device, seed=args.seed,
+        tA=tA, tB=tB,
+    )
+    print("[done] spef_matching_2 finished.")
+    if isinstance(out, dict):
+        summary = {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__) for k, v in out.items()}
+        print("[summary]", summary)
+    else:
+        print("[summary] return type:", type(out).__name__)
 
 
 if __name__ == "__main__":
