@@ -10,12 +10,14 @@ _tA_global = None
 _tB_global = None
 
 # Compiled slack kernel for fused computation
-def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, C, delta):
+def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, C, delta, cmax_int=None):
     """Fused slack computation: w = xb2 + xa2 - 2*(xb @ xAT), then scale/floor/cast, then broadcast subtract"""
     xb2 = (xb * xb).sum(dim=1, keepdim=True)  # [K,1]
     w = xb2 + xa2_cached - 2.0 * (xb @ xAT)   # [K,N]
     scaled = (3.0 * w) / (C.to(w.dtype) * float(delta))  # [K,N]
     c_tile = torch.floor(scaled).to(torch.int64)  # [K,N]
+    if cmax_int is not None:
+        c_tile = torch.clamp_max(c_tile, int(cmax_int))
     return c_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)  # [K,N]
 
 _compiled_slack = torch.compile(_slack_kernel, mode='reduce-overhead', dynamic=True)
@@ -142,7 +144,8 @@ def compute_slack_tile(
     slack_tile=None,
     tile_times=None,
     xAT=None,
-    xa2_cached=None
+    xa2_cached=None,
+    cmax_int=None
 ):
     current_k = len(idxB)
     
@@ -154,7 +157,7 @@ def compute_slack_tile(
         yB_idx = yB.index_select(0, idxB)                 # [K]
         
         # Call compiled fused kernel - dynamic=True handles varying K
-        slack_int64 = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta)
+        slack_int64 = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta, cmax_int)
         slack_view.copy_(slack_int64)
 
         # === NYC time mask (vectorized on GPU) ===
@@ -173,7 +176,7 @@ def compute_slack_tile(
         yB_idx = yB.index_select(0, idxB)                 # [K]
         
         # Call compiled fused kernel - dynamic=True handles varying K
-        slack = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta)
+        slack = _compiled_slack(xb, xAT, xa2_cached, yA, yB_idx, C, delta, cmax_int)
 
         # === NYC time mask (vectorized on GPU) ===
         times = tile_times if tile_times is not None else ((_tA_global), (_tB_global))
@@ -310,7 +313,8 @@ def spef_matching_2(
     device,
     seed=1,
     tA=None,
-    tB=None
+    tB=None,
+    cmax_int=None
 ):
     dtyp = torch.int64
     n = xA.shape[0]
@@ -372,7 +376,7 @@ def spef_matching_2(
                 start_event.record()
             else:
                 t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, C, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached)
+            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, C, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached, cmax_int=cmax_int)
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()

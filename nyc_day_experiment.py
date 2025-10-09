@@ -263,6 +263,7 @@ def main():
     ap.add_argument("--tile_k", type=int, default=4096, help="Tile size (if your solver expects it).")
     ap.add_argument("--C", type=float, default=None, help="Scaling factor. If omitted, compute from data on GPU.")
     ap.add_argument("--delta", type=float, default=1.0, help="delta parameter (as in your solver).")
+    ap.add_argument("--cmax", type=int, default=None, help="Cap INTEGERIZED edge cost; costs >= cmax become cmax (default: no cap).")
     ap.add_argument("--seed", type=int, default=1, help="Random seed (used by solver and C auto).")
 
     args = ap.parse_args()
@@ -323,6 +324,7 @@ def main():
         C=C_tensor, k=args.tile_k, delta=args.delta,
         device=device, seed=args.seed,
         tA=tA, tB=tB,
+        cmax_int=args.cmax,
     )
     t1 = time.perf_counter()
     wall = t1 - t0
@@ -342,6 +344,8 @@ def main():
         Mb, yA, yB, matching_cost, iteration, metrics = out
         print("\n[summary]")
         print(f"  N={N2}, k(tile)={args.tile_k}, delta={args.delta}, seed={args.seed}")
+        if args.cmax is not None:
+            print(f"  cmax={args.cmax}")
         print(f"  wall_time_s={wall:.3f}")
         try:
             print(f"  matching_cost={float(matching_cost):.6g}")
@@ -370,12 +374,16 @@ def main():
             except Exception:
                 print(f"  matching_cost={out['matching_cost']}")
         print(f"  wall_time_s={wall:.3f}")
+        if args.cmax is not None:
+            print(f"  cmax={args.cmax}")
         for k in out:
             if isinstance(out[k], torch.Tensor):
                 _preview_vec(k, out[k], k=10)
     else:
         print("\n[summary] return type:", type(out).__name__)
         print("  wall_time_s=", f"{wall:.3f}")
+        if args.cmax is not None:
+            print(f"  cmax={args.cmax}")
         print("  value:", out)
 
 
