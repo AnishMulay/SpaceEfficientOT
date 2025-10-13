@@ -400,5 +400,54 @@ def main():
         print("  value:", out)
 
 
+def run_nyc_experiment(input_path, zones_path, date, tz="America/New_York", n=None, tile_k=4096, C=None, delta=1.0, cmax=None, stopping_condition=None, seed=1):
+    """Run NYC experiment programmatically and return results."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load and process data
+    df = load_day(input_path)
+    pu_col, do_col, pu_id, do_id = normalize_columns(df)
+    df = filter_by_date_local(df, pu_col, do_col, date, tz=tz)
+    df = clean_and_sort(df, pu_col, do_col)
+    df = take_first_n(df, n)
+    
+    if len(df) == 0:
+        raise ValueError("No data after filtering")
+    
+    # Build tensors
+    df2, xA, xB, tA, tB = build_tensors_from_centroids(
+        df, pu_col, do_col, pu_id, do_id, zones_path, device
+    )
+    
+    # Compute C if not provided
+    if C is not None:
+        C_tensor = torch.as_tensor(C, device=device, dtype=torch.float32)
+    else:
+        C_tensor = compute_C_auto(xA, xB, device, seed)
+    
+    # Run solver
+    t0 = time.perf_counter()
+    out = spef_matching_2(
+        xA=xA, xB=xB, C=C_tensor, k=tile_k, delta=delta,
+        device=device, seed=seed, tA=tA, tB=tB,
+        cmax_int=cmax, stopping_condition=stopping_condition,
+    )
+    t1 = time.perf_counter()
+    
+    Mb, yA, yB, matching_cost, iteration, metrics = out
+    wall_time = t1 - t0
+    
+    return {
+        "n": len(df2),
+        "wall_time": wall_time,
+        "matching_cost": float(matching_cost),
+        "iterations": iteration,
+        "C": float(C_tensor),
+        "feasible_matches": metrics.get("feasible_matches", len(df2)),
+        "free_B": metrics.get("free_B", 0),
+        "metrics": metrics
+    }
+
+
 if __name__ == "__main__":
     main()
