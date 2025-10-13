@@ -120,6 +120,23 @@ def take_first_n(df: pd.DataFrame, n: int | None) -> pd.DataFrame:
         return df
     return df.iloc[:n].reset_index(drop=True)
 
+def sample_and_sort(df: pd.DataFrame, pu_col: str, n: int | None, random_sample: bool = False, seed: int = 1) -> pd.DataFrame:
+    """Sample n requests (randomly if random_sample=True) and sort by pickup time."""
+    if n is None:
+        return df
+    if n <= 0:
+        raise ValueError("n must be positive if provided")
+    if n >= len(df):
+        return df
+    
+    if random_sample:
+        # Random sample then sort by pickup time
+        sampled = df.sample(n=n, random_state=seed).reset_index(drop=True)
+        return sampled.sort_values(pu_col).reset_index(drop=True)
+    else:
+        # Take first n (existing behavior)
+        return df.iloc[:n].reset_index(drop=True)
+
 
 def to_epoch_seconds_utc(dt_series: pd.Series) -> np.ndarray:
     """
@@ -260,6 +277,7 @@ def main():
     ap.add_argument("--date", required=True, help="Single LOCAL date to keep, e.g., 2014-01-10.")
     ap.add_argument("--tz", default="America/New_York", help="Timezone for --date (default: America/New_York).")
     ap.add_argument("--n", type=int, default=None, help="If provided, take only the first n requests after sorting.")
+    ap.add_argument("--random_sample", action="store_true", help="If set, randomly sample n requests then sort by pickup time (default: take first n).")
     ap.add_argument("--tile_k", type=int, default=4096, help="Tile size (if your solver expects it).")
     ap.add_argument("--C", type=float, default=None, help="Scaling factor. If omitted, compute from data on GPU.")
     ap.add_argument("--delta", type=float, default=1.0, help="delta parameter (as in your solver).")
@@ -278,10 +296,10 @@ def main():
     print(f"[debug] loaded trips columns ({len(df.columns)}): {list(df.columns)}")
     pu_col, do_col, pu_id, do_id = normalize_columns(df)
 
-    # Filter to one local day, clean, sort, cap to first n
+    # Filter to one local day, clean, sort, sample n requests
     df = filter_by_date_local(df, pu_col, do_col, args.date, tz=args.tz)
     df = clean_and_sort(df, pu_col, do_col)
-    df = take_first_n(df, args.n)
+    df = sample_and_sort(df, pu_col, args.n, args.random_sample, args.seed)
 
     N = len(df)
     print(f"[info] entries on {args.date}: {N}")
@@ -400,7 +418,7 @@ def main():
         print("  value:", out)
 
 
-def run_nyc_experiment(input_path, zones_path, date, tz="America/New_York", n=None, tile_k=4096, C=None, delta=1.0, cmax=None, stopping_condition=None, seed=1):
+def run_nyc_experiment(input_path, zones_path, date, tz="America/New_York", n=None, tile_k=4096, C=None, delta=1.0, cmax=None, stopping_condition=None, seed=1, random_sample=False):
     """Run NYC experiment programmatically and return results."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -409,7 +427,7 @@ def run_nyc_experiment(input_path, zones_path, date, tz="America/New_York", n=No
     pu_col, do_col, pu_id, do_id = normalize_columns(df)
     df = filter_by_date_local(df, pu_col, do_col, date, tz=tz)
     df = clean_and_sort(df, pu_col, do_col)
-    df = take_first_n(df, n)
+    df = sample_and_sort(df, pu_col, n, random_sample, seed)
     
     if len(df) == 0:
         raise ValueError("No data after filtering")

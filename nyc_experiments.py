@@ -55,7 +55,8 @@ def run_single_experiment(n, stopping_condition, cmax):
             date=DATE,
             n=n,
             cmax=cmax,
-            stopping_condition=stopping_condition
+            stopping_condition=stopping_condition,
+            random_sample=True
         )
         
         # Add experiment parameters
