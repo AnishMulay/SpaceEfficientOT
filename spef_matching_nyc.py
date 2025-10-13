@@ -314,7 +314,8 @@ def spef_matching_2(
     seed=1,
     tA=None,
     tB=None,
-    cmax_int=None
+    cmax_int=None,
+    stopping_condition=None
 ):
     dtyp = torch.int64
     n = xA.shape[0]
@@ -342,7 +343,7 @@ def spef_matching_2(
     one = torch.tensor([1], device=device, dtype=dtyp, requires_grad=False)[0]
     minus_one = torch.tensor([-1], device=device, dtype=dtyp, requires_grad=False)[0]
 
-    f_threshold = m*delta/C
+    f_threshold = stopping_condition if stopping_condition is not None else m*delta/C
     torch.manual_seed(seed)
     
     # Compute one-time caches for compiled kernel
@@ -454,17 +455,44 @@ def spef_matching_2(
     t5 = time.perf_counter()
     final_fill_time = t5 - t4
     
+    # Remove infeasible edges (cost >= cmax_int) from matching
+    feasible_matches = m
+    free_B = 0
+    if cmax_int is not None:
+        # Compute integerized costs for matched edges
+        xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)
+        xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)
+        mb = Mb.detach().cpu().numpy().astype(np.int64, copy=False)
+        
+        infeasible_mask = torch.zeros(m, dtype=torch.bool)
+        for i in range(m):
+            cost_sq = sqeuclidean(xb64[i], xa64[mb[i]])
+            int_cost = int((3.0 * cost_sq) / (float(C) * delta))
+            if int_cost >= cmax_int:
+                infeasible_mask[i] = True
+        
+        # Remove infeasible matches
+        infeasible_b = torch.where(infeasible_mask)[0]
+        infeasible_a = Mb[infeasible_b]
+        Mb[infeasible_b] = -1
+        Ma[infeasible_a] = -1
+        
+        feasible_matches = m - len(infeasible_b)
+        free_B = len(infeasible_b)
+    
     # Time total matching cost calculation
     t6 = time.perf_counter()
-    xa64 = xA.detach().cpu().numpy().astype(np.float64, copy=False)  # N x d
-    xb64 = xB.detach().cpu().numpy().astype(np.float64, copy=False)  # M x d
-    mb   = Mb.detach().cpu().numpy().astype(np.int64,   copy=False)  # M
-
-    # Streaming per-pair sqeuclidean in float64 (no full matrix)
-    matching_cost = np.add.reduce(
-        [sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(xb64.shape[0])],
-        dtype=np.float64
-    )
+    mb = Mb.detach().cpu().numpy().astype(np.int64, copy=False)
+    
+    # Only compute cost for feasible matches
+    matched_mask = mb != -1
+    if matched_mask.any():
+        matching_cost = np.add.reduce(
+            [sqeuclidean(xb64[i], xa64[mb[i]]) for i in range(m) if matched_mask[i]],
+            dtype=np.float64
+        )
+    else:
+        matching_cost = 0.0
     matching_cost = torch.as_tensor(matching_cost, dtype=torch.float64)
     t7 = time.perf_counter()
     cost_calc_time = t7 - t6
@@ -481,7 +509,9 @@ def spef_matching_2(
         "tile_updates_avg": tile_updates_avg,
         "final_fill_time": final_fill_time,
         "cost_calc_time": cost_calc_time,
-        "inner_loops_count": inner_loops_count
+        "inner_loops_count": inner_loops_count,
+        "feasible_matches": feasible_matches,
+        "free_B": free_B
     }
 
     return Mb, yA, yB, matching_cost, iteration, timing_metrics

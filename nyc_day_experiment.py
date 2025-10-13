@@ -264,6 +264,7 @@ def main():
     ap.add_argument("--C", type=float, default=None, help="Scaling factor. If omitted, compute from data on GPU.")
     ap.add_argument("--delta", type=float, default=1.0, help="delta parameter (as in your solver).")
     ap.add_argument("--cmax", type=int, default=None, help="Cap INTEGERIZED edge cost; costs >= cmax become cmax (default: no cap).")
+    ap.add_argument("--stopping_condition", type=int, default=None, help="Early stopping after this many steps (default: no early stopping).")
     ap.add_argument("--seed", type=int, default=1, help="Random seed (used by solver and C auto).")
 
     args = ap.parse_args()
@@ -325,6 +326,7 @@ def main():
         device=device, seed=args.seed,
         tA=tA, tB=tB,
         cmax_int=args.cmax,
+        stopping_condition=args.stopping_condition,
     )
     t1 = time.perf_counter()
     wall = t1 - t0
@@ -346,6 +348,8 @@ def main():
         print(f"  N={N2}, k(tile)={args.tile_k}, delta={args.delta}, seed={args.seed}")
         if args.cmax is not None:
             print(f"  cmax={args.cmax}")
+        if args.stopping_condition is not None:
+            print(f"  stopping_condition={args.stopping_condition}")
         print(f"  wall_time_s={wall:.3f}")
         try:
             print(f"  matching_cost={float(matching_cost):.6g}")
@@ -357,9 +361,14 @@ def main():
         if isinstance(metrics, dict):
             for k in ("slack_compute_total", "slack_compute_avg",
                       "tile_updates_total", "tile_updates_avg",
-                      "final_fill_time", "cost_calc_time", "inner_loops_count"):
+                      "final_fill_time", "cost_calc_time", "inner_loops_count",
+                      "feasible_matches", "free_B"):
                 if k in metrics:
                     print(f"  {k}={metrics[k]}")
+        
+        # Summary of matching results
+        if isinstance(metrics, dict) and "feasible_matches" in metrics and "free_B" in metrics:
+            print(f"\n[matching_summary] feasible_matches={metrics['feasible_matches']}, unmatched_requests={metrics['free_B']}, total_B={N2}")
 
         # Tiny previews of vectors
         _preview_vec("Mb (match for B→A)", Mb, k=10)
@@ -376,6 +385,8 @@ def main():
         print(f"  wall_time_s={wall:.3f}")
         if args.cmax is not None:
             print(f"  cmax={args.cmax}")
+        if args.stopping_condition is not None:
+            print(f"  stopping_condition={args.stopping_condition}")
         for k in out:
             if isinstance(out[k], torch.Tensor):
                 _preview_vec(k, out[k], k=10)
@@ -384,6 +395,8 @@ def main():
         print("  wall_time_s=", f"{wall:.3f}")
         if args.cmax is not None:
             print(f"  cmax={args.cmax}")
+        if args.stopping_condition is not None:
+            print(f"  stopping_condition={args.stopping_condition}")
         print("  value:", out)
 
 
