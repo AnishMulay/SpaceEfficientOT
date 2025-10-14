@@ -7,7 +7,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,10 @@ def load_one_day_latlon(
     tz="America/New_York",
     pickup_cols=("pickup_datetime","pickup_longitude","pickup_latitude"),
     dropoff_cols=("dropoff_datetime","dropoff_longitude","dropoff_latitude"),
-    device="cuda"
+    device="cuda",
+    sample_n: Optional[int] = None,
+    random_sample: bool = False,
+    seed: int = 1,
 ):
     """
     Returns:
@@ -71,7 +74,17 @@ def load_one_day_latlon(
     mask_day  = (df[p_time] >= day_start) & (df[p_time] < day_end) & df[p_time].notna() & df[d_time].notna()
 
     cols = [p_time, p_lon, p_lat, d_time, d_lon, d_lat]
-    df2 = df.loc[mask_day, cols].dropna()
+    df2 = df.loc[mask_day, cols].dropna().copy()
+    df2.sort_values(by=p_time, inplace=True, kind="mergesort")
+
+    if sample_n is not None:
+        if sample_n <= 0:
+            raise ValueError("--n must be a positive integer")
+    if sample_n is not None and sample_n > 0 and len(df2) > sample_n:
+        if random_sample:
+            df2 = df2.sample(n=sample_n, random_state=seed).sort_values(by=p_time, kind="mergesort")
+        else:
+            df2 = df2.head(sample_n)
 
     # Build tensors: note we keep (lon,lat) ordering consistently
     xB = torch.tensor(df2[[p_lon, p_lat]].to_numpy(np.float32), device=device)  # pickups (B/right)
@@ -221,6 +234,9 @@ def run_one_day(args: argparse.Namespace, device: torch.device) -> Dict[str, Any
             day=args.day,
             tz=args.tz,
             device=device,
+            sample_n=args.n,
+            random_sample=args.random_sample,
+            seed=args.seed,
         )
         _sync_if_cuda(device)
         load_end = time.perf_counter()
@@ -251,6 +267,7 @@ def run_one_day(args: argparse.Namespace, device: torch.device) -> Dict[str, Any
         ("scale", args.scale),
         ("use_int_costs", args.int_costs),
         ("device", device),
+        ("seed", args.seed),
     )
 
     solver_kwargs: Dict[str, Any] = {}
@@ -323,6 +340,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--int_costs", action="store_true", help="Use integer-cost path in solver.")
     parser.add_argument("--block_rows", type=int, default=4096, help="Tile rows for pairwise Haversine.")
     parser.add_argument("--block_cols", type=int, default=4096, help="Tile cols for pairwise Haversine.")
+    parser.add_argument("--n", type=int, default=None, help="If provided, limit to this many requests after filtering.")
+    parser.add_argument("--random_sample", action="store_true", help="If set with --n, draw a random sample of requests before sorting.")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed for sampling and solver.")
     parser.add_argument("--output_json", default=None, help="Optional path to write run metrics as JSON.")
     return parser.parse_args()
 

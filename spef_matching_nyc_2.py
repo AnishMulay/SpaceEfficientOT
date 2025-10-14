@@ -211,7 +211,7 @@ def compute_slack_tile(
     scale_tensor = xb.new_full((), scale_factor)
 
     if tile_times is None:
-        tA_mask = yA.new_full((xA.shape[0],), torch.iinfo(torch.int64).max)
+        tA_mask = yA.new_zeros(xA.shape[0], dtype=torch.int64)
         tB_tile = yB_idx.new_zeros(current_k, dtype=torch.int64)
     else:
         tA_mask, tB_tile = _mask_times(idxB, tile_times)
@@ -226,6 +226,29 @@ def compute_slack_tile(
         tB_tile,
         cmax_int,
     )
+
+    if slack_tile is not None and current_k <= slack_tile.shape[0]:
+        reuse = slack_tile[:current_k]
+        reuse.copy_(slack)
+        return reuse
+
+    return slack
+
+
+def compute_slack_tile_from_cost(
+    idxB: torch.Tensor,
+    pre_scaled_cost: torch.Tensor,
+    yA: torch.Tensor,
+    yB: torch.Tensor,
+    slack_tile: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    current_k = idxB.numel()
+    if current_k == 0:
+        return torch.empty((0, yA.shape[0]), dtype=pre_scaled_cost.dtype, device=pre_scaled_cost.device)
+
+    rows = pre_scaled_cost.index_select(0, idxB)
+    row_potentials = yB.index_select(0, idxB).unsqueeze(1)
+    slack = rows - yA.unsqueeze(0) - row_potentials
 
     if slack_tile is not None and current_k <= slack_tile.shape[0]:
         reuse = slack_tile[:current_k]
@@ -273,6 +296,7 @@ def spef_matching_2(
     tB: Optional[torch.Tensor] = None,
     cmax_int: Optional[int] = None,
     stopping_condition: Optional[float] = None,
+    cost_matrix: Optional[torch.Tensor] = None,
 ):
     dtyp = torch.int64
     n = xA.shape[0]
@@ -304,18 +328,32 @@ def spef_matching_2(
     torch.manual_seed(seed)
 
     slack_tile = torch.zeros(k, n, device=device, dtype=torch.int64)
-    xA_rad = torch.deg2rad(xA)
-    if _tA_global is not None and _tB_global is not None:
-        times_tuple = (_tA_global, _tB_global)
+    pre_scaled_cost = None
+    scale_factor = 3.0 / (_to_float_scalar(C) * _to_float_scalar(delta))
+
+    if cost_matrix is not None:
+        cost_km = cost_matrix.to(device=device, dtype=torch.float32) / 1000.0
+        scaled_cost = torch.floor(cost_km * scale_factor).to(torch.int64)
+        sentinel = scaled_cost.new_full((), _MASK_SENTINEL_INT)
+        mask = None
+        if _tA_global is not None and _tB_global is not None:
+            mask = _tB_global.view(-1, 1) < _tA_global.view(1, -1)
+            scaled_cost = torch.where(mask, sentinel, scaled_cost)
+        if cmax_int is not None:
+            clamp_val = scaled_cost.new_full((), int(cmax_int))
+            if mask is not None:
+                scaled_cost = torch.where(mask, sentinel, torch.minimum(scaled_cost, clamp_val))
+            else:
+                scaled_cost = torch.minimum(scaled_cost, clamp_val)
+        pre_scaled_cost = scaled_cost
+        times_tuple = None
+        xA_rad = None
     else:
-        tA_default = torch.full(
-            (n,),
-            torch.iinfo(torch.int64).max,
-            device=device,
-            dtype=torch.int64,
-        )
-        tB_default = torch.zeros(m, device=device, dtype=torch.int64)
-        times_tuple = (tA_default, tB_default)
+        xA_rad = torch.deg2rad(xA)
+        if _tA_global is not None and _tB_global is not None:
+            times_tuple = (_tA_global, _tB_global)
+        else:
+            times_tuple = None
 
     slack_compute_total = 0.0
     tile_updates_total = 0.0
@@ -336,19 +374,28 @@ def spef_matching_2(
                 start_event.record()
             else:
                 t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(
-                ind_b_free,
-                xA,
-                xB,
-                yA,
-                yB,
-                C,
-                delta,
-                slack_tile=slack_tile,
-                tile_times=times_tuple,
-                xA_rad=xA_rad,
-                cmax_int=cmax_int,
-            )
+            if pre_scaled_cost is not None:
+                slack_tile_used = compute_slack_tile_from_cost(
+                    ind_b_free,
+                    pre_scaled_cost,
+                    yA,
+                    yB,
+                    slack_tile=slack_tile,
+                )
+            else:
+                slack_tile_used = compute_slack_tile(
+                    ind_b_free,
+                    xA,
+                    xB,
+                    yA,
+                    yB,
+                    C,
+                    delta,
+                    slack_tile=slack_tile,
+                    tile_times=times_tuple,
+                    xA_rad=xA_rad,
+                    cmax_int=cmax_int,
+                )
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()
