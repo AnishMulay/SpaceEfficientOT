@@ -169,6 +169,9 @@ def main():
     parser.add_argument("--random_sample", action="store_true", help="Random sample instead of first n")
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
     parser.add_argument("--device", default="cuda", help="Device (cuda/cpu)")
+
+    parser.add_argument("--k", type=int, default=500, help="Tile size")
+    parser.add_argument("--delta", type=float, default=0.01, help="Approximation parameter")
     
     args = parser.parse_args()
     
@@ -202,9 +205,35 @@ def main():
     print(f"\nData ready for solver!")
     print(f"Call solver with: xA={xA.shape}, xB={xB.shape}, tA={tA.shape}, tB={tB.shape}")
     
-    # TODO: Call solver here when ready
-    # from spef_matching_nyc_3 import spef_matching_2
-    # result = spef_matching_2(xA=xA, xB=xB, tA=tA, tB=tB, ...)
+    # Call solver with parameters
+    from spef_matching_nyc_3 import spef_matching_2
+    from haversine_utils import haversine_distance_cpu
+    
+    # Estimate C using sample-based approach
+    import random
+    random.seed(args.seed)
+    sample_idx = random.randint(0, len(xB) - 1)
+    lat_b, lon_b = xB[sample_idx, 1].cpu(), xB[sample_idx, 0].cpu()
+    
+    max_dist = 0.0
+    for i in range(len(xA)):
+        lat_a, lon_a = xA[i, 1].cpu(), xA[i, 0].cpu()
+        dist = haversine_distance_cpu(lat_b, lon_b, lat_a, lon_a)
+        max_dist = max(max_dist, dist.item())
+    
+    C = 4.0 * max_dist
+    
+    print(f"\nEstimated C={C:.2f} from sample distances")
+    print(f"Calling solver with C={C:.2f}, k={args.k}, delta={args.delta}")
+    result = spef_matching_2(
+        xA=xA, xB=xB, C=C, k=args.k, delta=args.delta, device=device,
+        tA=tA, tB=tB, seed=args.seed
+    )
+    
+    Mb, yA, yB, matching_cost, iterations, timing_metrics = result
+    print(f"Solver completed in {iterations} iterations")
+    print(f"Total matching cost: {matching_cost:.2f}")
+    print(f"Timing metrics: {timing_metrics}")
 
 
 if __name__ == "__main__":
