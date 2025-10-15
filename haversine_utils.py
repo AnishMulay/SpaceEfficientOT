@@ -58,18 +58,16 @@ def _fused_slack_kernel(
         a = tl.load(EA_k, mask=mask_n, other=0.0)[None, :]          # (1,BLOCK_N)
         acc += b * a
 
-    # Now acc = M (cosΔφ cosΔλ)
-    # Convert to cost
-    h = 0.5 * (1.0 - acc)
-    h = tl.maximum(tl.minimum(h, 1.0), 0.0)  # clamp for safety
-
+    # Now acc = M (dot product of unit vectors)
     if USE_METERS:
-        # d = 2R*asin(sqrt(h))
-        s = tl.sqrt(h)
-        d = 2.0 * R * tl.asin(s)
-        cost = d
+        # Use small-angle approximation: distance ≈ 2*R*sqrt(0.5*(1-M))
+        h = 0.5 * (1.0 - acc)
+        h = tl.maximum(h, 0.0)  # clamp for safety
+        cost = 2.0 * R * tl.sqrt(h)
     else:
         # squared-chord cost = 4R^2 h
+        h = 0.5 * (1.0 - acc)
+        h = tl.maximum(tl.minimum(h, 1.0), 0.0)  # clamp for safety
         cost = 4.0 * (R*R) * h
 
     # slack = cost - yA[col] - yB[row] - delta
