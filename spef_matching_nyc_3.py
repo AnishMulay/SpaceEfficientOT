@@ -203,6 +203,10 @@ def spef_matching_2(
     while f > f_threshold:
         # Get all free B points
         ind_b_all_free = torch.where(Mb == minus_one)[0]
+        free_b_count = ind_b_all_free.numel()
+        print(
+            f"Iteration {iteration}: free B points={free_b_count}, matched={m - free_b_count}, f={f}"
+        )
 
         if stopping_condition is not None and ind_b_all_free.numel() <= stopping_condition:
             break
@@ -211,6 +215,9 @@ def spef_matching_2(
         for start_idx in range(0, len(ind_b_all_free), k):
             end_idx = min(start_idx + k, len(ind_b_all_free))
             ind_b_free = ind_b_all_free[start_idx:end_idx]
+            print(
+                f"  Tile {start_idx // k + 1}: processing {ind_b_free.numel()} B points (indices {start_idx}-{end_idx - 1})"
+            )
             
             # Time slack tile compute
             if device.type == "cuda":
