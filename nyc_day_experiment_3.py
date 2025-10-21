@@ -5,6 +5,9 @@ Load data, sample n requests, sort by pickup time, prepare for solver.
 """
 
 import argparse
+import json
+from pathlib import Path
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import torch
@@ -260,9 +263,12 @@ def main():
 
     print(f"Solver elapsed time: {solver_elapsed:.2f} s")
 
+    avg_cost_m = None
+    avg_cost_km = None
     if feasible_matches > 0:
         avg_cost_m = total_cost_m / feasible_matches
         avg_cost_km = avg_cost_m / 1000.0
+    if avg_cost_km is not None:
         print(f"Total matching cost (km): {total_cost_km:.2f}")
         print(
             f"Average matching cost per feasible edge: {avg_cost_m:.2f} m ({avg_cost_km:.4f} km)"
@@ -272,6 +278,43 @@ def main():
         print("Average matching cost per feasible edge: undefined (no feasible matches)")
 
     print(f"Feasible matches: {feasible_matches}, Free B nodes: {free_b}")
+
+    output_dir = Path("nyc")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_value = args.n if args.n is not None else len(df)
+    filename = (
+        f"results_N{n_value}_D{args.delta}_C{args.cmax}_S{args.stopping_condition}.json"
+    )
+    output_path = output_dir / filename
+    timestamp = datetime.now().isoformat()
+    entry = {
+        "timestamp": timestamp,
+        "parameters": {
+            "n": n_value,
+            "delta": args.delta,
+            "cmax": args.cmax,
+            "stopping_condition": args.stopping_condition,
+        },
+        "results": {
+            "total_solver_time_s": solver_elapsed,
+            "total_matching_cost_km": total_cost_km,
+            "average_matching_cost_km": avg_cost_km,
+            "free_B": free_b,
+        },
+    }
+    if output_path.exists():
+        with output_path.open("r", encoding="utf-8") as f:
+            try:
+                existing = json.load(f)
+            except json.JSONDecodeError:
+                existing = []
+    else:
+        existing = []
+    if not isinstance(existing, list):
+        existing = [existing]
+    existing.append(entry)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
 
 
 if __name__ == "__main__":
