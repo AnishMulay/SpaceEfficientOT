@@ -26,7 +26,13 @@ def _unit_sphere_embedding(lat_deg: torch.Tensor, lon_deg: torch.Tensor) -> torc
     )
 
 
-def _prepare_haversine_cache(xA: torch.Tensor, xB: torch.Tensor, R: float = _EARTH_RADIUS_METERS):
+def _prepare_haversine_cache(
+    xA: torch.Tensor,
+    xB: torch.Tensor,
+    C,
+    delta,
+    R: float = _EARTH_RADIUS_METERS,
+):
     """
     Precompute unit-sphere embeddings for A and B once so each slack tile
     can reuse them without re-evaluating trig functions.
@@ -36,37 +42,33 @@ def _prepare_haversine_cache(xA: torch.Tensor, xB: torch.Tensor, R: float = _EAR
     EB = _unit_sphere_embedding(xB[:, 1], xB[:, 0]).to(dtype=target_dtype)
     EA = EA.contiguous()
     EB = EB.contiguous()
+    scale = 3.0 / (float(C) * float(delta))
+
     return {
         "EA": EA,
         "EB": EB,
         "EA_T": EA.transpose(0, 1).contiguous(),
         "R": torch.tensor(R, device=xA.device, dtype=target_dtype),
+        "scale": torch.tensor(scale, device=xA.device, dtype=target_dtype),
     }
 
 
-def _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int=None):
+def _compute_haversine_cost_tile(idxB, geo_cache):
     if geo_cache is None:
         raise ValueError("geo_cache must be provided for Haversine slack computation.")
 
     EA_T = geo_cache["EA_T"]
     EB = geo_cache["EB"]
     R = geo_cache["R"]
+    scale = geo_cache["scale"]
 
     EB_tile = EB.index_select(0, idxB)
     cos_angles = EB_tile @ EA_T
     cos_angles = torch.clamp(cos_angles, -1.0, 1.0)
     distances = R * torch.acos(cos_angles)
 
-    yB_idx = yB.index_select(0, idxB).to(distances.dtype)
-    yA_all = yA.to(distances.dtype)
-    delta_val = float(delta)
-    slack_float = distances - yB_idx.unsqueeze(1) - yA_all.unsqueeze(0) - delta_val
-
-    scaled = (3.0 * slack_float) / (float(C) * delta_val)
-    slack_int = torch.floor(scaled).to(torch.int64)
-    if cmax_int is not None:
-        slack_int = torch.clamp_max(slack_int, int(cmax_int))
-    return slack_int
+    scaled_cost = torch.floor(distances * scale).to(torch.int64)
+    return scaled_cost
 
 
 def unique(x, input_sorted = False):
@@ -95,39 +97,45 @@ def compute_slack_tile(
     cmax_int=None,
 ):
     current_k = len(idxB)
+    if current_k == 0:
+        if slack_tile is not None:
+            return slack_tile[:0]
+        return torch.empty(0, xA.shape[0], dtype=torch.int64, device=xA.device)
     
+    yB_idx = yB.index_select(0, idxB)
+
+    cost_tile = _compute_haversine_cost_tile(idxB, geo_cache)
+
+    times = tile_times if tile_times is not None else ((_tA_global), (_tB_global))
+    invalid_mask = None
+    if times is not None and times[0] is not None and times[1] is not None:
+        tA_all, tB_all = times  # int64 [N], [N]
+        tB_sel = tB_all.index_select(0, idxB)  # [K]
+        invalid = tB_sel.view(-1, 1) < tA_all.view(1, -1)  # [K,N] bool
+        if invalid.any():
+            invalid_mask = invalid
+            if cmax_int is not None:
+                sentinel = cost_tile.new_full((), torch.iinfo(cost_tile.dtype).max)
+                cost_tile = cost_tile.masked_fill(invalid, sentinel)
+            else:
+                bigM = cost_tile.new_full((), 10**12)
+                cost_tile = cost_tile.masked_fill(invalid, bigM)
+
+    if cmax_int is not None:
+        cost_tile = torch.clamp_max(cost_tile, int(cmax_int))
+
+    slack_int = cost_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)
+
+    if invalid_mask is not None:
+        bigM_slack = slack_int.new_full((), 10**12)
+        slack_int = slack_int.masked_fill(invalid_mask, bigM_slack)
+
     if slack_tile is not None and current_k <= slack_tile.shape[0]:
-        # Reuse pre-allocated tensor
         slack_view = slack_tile[:current_k]
-        
-        # Extract lat/lon coordinates
-        slack_int64 = _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int)
-        slack_view.copy_(slack_int64)
+        slack_view.copy_(slack_int)
+        return slack_view
 
-        # === NYC time mask (vectorized on GPU) ===
-        times = tile_times if tile_times is not None else ((_tA_global), (_tB_global))
-        if times is not None and times[0] is not None and times[1] is not None:
-            tA_all, tB_all = times  # int64 [N], [N]
-            tB_sel = tB_all.index_select(0, idxB)  # [K]
-            invalid = tB_sel.view(-1, 1) < tA_all.view(1, -1)  # [K,N] bool
-            bigM = torch.tensor(10**12, device=slack_view.device, dtype=slack_view.dtype)
-            slack_view.masked_fill_(invalid, bigM)
-        # === end time mask ===
-        return slack_view  # [current_k,N] int64
-    else:
-        # Fallback branch when we cannot reuse the pre-allocated tile
-        slack = _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int)
-
-        # === NYC time mask (vectorized on GPU) ===
-        times = tile_times if tile_times is not None else ((_tA_global), (_tB_global))
-        if times is not None and times[0] is not None and times[1] is not None:
-            tA_all, tB_all = times  # int64 [N], [N]
-            tB_sel = tB_all.index_select(0, idxB)  # [K]
-            invalid = tB_sel.view(-1, 1) < tA_all.view(1, -1)  # [K,N] bool
-            bigM = torch.tensor(10**12, device=slack.device, dtype=slack.dtype)
-            slack.masked_fill_(invalid, bigM)
-        # === end time mask ===
-        return slack  # [K,N] int64
+    return slack_int  # [K,N] int64
 
 
 def spef_matching_2(
@@ -169,10 +177,11 @@ def spef_matching_2(
     one = torch.tensor([1], device=device, dtype=dtyp, requires_grad=False)[0]
     minus_one = torch.tensor([-1], device=device, dtype=dtyp, requires_grad=False)[0]
 
-    f_threshold = stopping_condition if stopping_condition is not None else m*delta/C
+    C_value = float(C)
+    f_threshold = stopping_condition if stopping_condition is not None else m*delta/C_value
     torch.manual_seed(seed)
     
-    geo_cache = _prepare_haversine_cache(xA, xB)
+    geo_cache = _prepare_haversine_cache(xA, xB, C_value, delta)
     
     # Note: Haversine doesn't need precomputed caches like Euclidean
     xAT = None  # Not used for Haversine
@@ -194,6 +203,9 @@ def spef_matching_2(
     while f > f_threshold:
         # Get all free B points
         ind_b_all_free = torch.where(Mb == minus_one)[0]
+
+        if stopping_condition is not None and ind_b_all_free.numel() <= stopping_condition:
+            break
         
         # Process k points at a time
         for start_idx in range(0, len(ind_b_all_free), k):

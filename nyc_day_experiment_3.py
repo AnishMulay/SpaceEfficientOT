@@ -172,6 +172,13 @@ def main():
 
     parser.add_argument("--k", type=int, default=500, help="Tile size")
     parser.add_argument("--delta", type=float, default=0.01, help="Approximation parameter")
+    parser.add_argument("--cmax", type=int, default=None, help="Clamp integerized costs at this value (default: no clamp)")
+    parser.add_argument(
+        "--stopping_condition",
+        type=int,
+        default=None,
+        help="Stop once free B requests fall to this count (default: run to convergence)",
+    )
     
     args = parser.parse_args()
     
@@ -179,6 +186,10 @@ def main():
     print(f"Input file: {args.input}")
     if args.n:
         print(f"Sampling: {args.n} requests ({'random' if args.random_sample else 'first'})")
+    if args.cmax is not None:
+        print(f"Cost clamp (cmax): {args.cmax}")
+    if args.stopping_condition is not None:
+        print(f"Stopping condition (free B threshold): {args.stopping_condition}")
     
     # Load and prepare data
     df, col_mapping = load_and_filter_data(
@@ -227,7 +238,9 @@ def main():
     print(f"Calling solver with C={C:.2f}, k={args.k}, delta={args.delta}")
     result = spef_matching_2(
         xA=xA, xB=xB, C=C, k=args.k, delta=args.delta, device=device,
-        tA=tA, tB=tB, seed=args.seed
+        tA=tA, tB=tB, seed=args.seed,
+        cmax_int=args.cmax,
+        stopping_condition=args.stopping_condition,
     )
     
     Mb, yA, yB, matching_cost, iterations, timing_metrics = result
