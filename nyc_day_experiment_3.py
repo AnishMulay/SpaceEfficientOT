@@ -236,23 +236,29 @@ def main():
     
     print(f"\nEstimated C={C:.2f} from sample distances")
     print(f"Calling solver with C={C:.2f}, k={args.k}, delta={args.delta}")
+    solver_start = time.perf_counter()
     result = spef_matching_2(
         xA=xA, xB=xB, C=C, k=args.k, delta=args.delta, device=device,
         tA=tA, tB=tB, seed=args.seed,
         cmax_int=args.cmax,
         stopping_condition=args.stopping_condition,
     )
+    solver_elapsed = time.perf_counter() - solver_start
     
     Mb, yA, yB, matching_cost, iterations, timing_metrics = result
     print(f"Solver completed in {iterations} iterations")
     print(f"Total matching cost: {matching_cost:.2f}")
     print(f"Timing metrics: {timing_metrics}")
+    print()
+    print()
 
     # Additional human-readable summaries
     total_cost_m = float(matching_cost)
     total_cost_km = total_cost_m / 1000.0
     feasible_matches = timing_metrics.get("feasible_matches", 0)
     free_b = timing_metrics.get("free_B", 0)
+
+    print(f"Solver elapsed time: {solver_elapsed:.2f} s")
 
     if feasible_matches > 0:
         avg_cost_m = total_cost_m / feasible_matches
