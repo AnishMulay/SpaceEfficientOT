@@ -222,10 +222,11 @@ def spef_matching_2(
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()
-                slack_compute_total += start_event.elapsed_time(end_event) / 1000.0
+                slack_elapsed = start_event.elapsed_time(end_event) / 1000.0
             else:
                 t1 = time.perf_counter()
-                slack_compute_total += t1 - t0
+                slack_elapsed = t1 - t0
+            slack_compute_total += slack_elapsed
             
             # Time subsequent per-tile updates
             if device.type == "cuda":
@@ -271,11 +272,17 @@ def spef_matching_2(
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()
-                tile_updates_total += start_event.elapsed_time(end_event) / 1000.0
+                update_elapsed = start_event.elapsed_time(end_event) / 1000.0
             else:
                 t3 = time.perf_counter()
-                tile_updates_total += t3 - t2
+                update_elapsed = t3 - t2
+            tile_updates_total += update_elapsed
             inner_loops_count += 1
+
+            print(
+                f"[perf] iter={iteration} tile_start={start_idx} size={len(ind_b_free)} "
+                f"slack={slack_elapsed:.4f}s update={update_elapsed:.4f}s free_B={f}"
+            )
         
         iteration += 1
 
