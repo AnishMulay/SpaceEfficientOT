@@ -1,58 +1,72 @@
 import numpy as np
 import torch
 import time
-from cuda_deque import CudaDeque
-from scipy.spatial.distance import cdist
-from scipy.spatial.distance import sqeuclidean
-from haversine_utils import fused_slack_haversine, haversine_distance_cpu
+from haversine_utils import haversine_distance_cpu
 
 # Global times for NYC mask
 _tA_global = None
 _tB_global = None
 
-# Compiled slack kernel for Haversine computation
-def _slack_kernel_haversine(latB, lonB, latA, lonA, yA, yB_idx, C, delta, cmax_int=None, R=6371000.0):
-    """Haversine-based slack computation"""
-    # Calculate Haversine distances
-    if latB.device.type == "cuda":
-        # Use GPU-optimized version when available
-        try:
-            K, N = latB.shape[0], latA.shape[0]
-            slack_out = torch.empty(K, N, device=latB.device, dtype=torch.float32)
-            fused_slack_haversine(
-                latA, lonA, latB, lonB, 
-                yA.float(), yB_idx.float(), slack_out,
-                use_meters=True, R=R, delta=delta
-            )
-            # Convert to int64 and apply scaling
-            scaled = (3.0 * slack_out) / (float(C) * float(delta))
-            c_tile = torch.floor(scaled).to(torch.int64)
-            if cmax_int is not None:
-                c_tile = torch.clamp_max(c_tile, int(cmax_int))
-            return c_tile
-        except:
-            # Fallback to CPU implementation
-            pass
-    
-    # CPU fallback or when GPU version fails
-    K, N = latB.shape[0], latA.shape[0]
-    distances = torch.zeros(K, N, device=latB.device, dtype=torch.float32)
-    
-    for i in range(K):
-        for j in range(N):
-            dist = haversine_distance_cpu(latB[i], lonB[i], latA[j], lonA[j], R)
-            distances[i, j] = dist
-    
-    # Scale and convert to int64
-    scaled = (3.0 * distances) / (float(C) * float(delta))
-    c_tile = torch.floor(scaled).to(torch.int64)
-    if cmax_int is not None:
-        c_tile = torch.clamp_max(c_tile, int(cmax_int))
-    
-    # Subtract duals
-    return c_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)
+_EARTH_RADIUS_METERS = 6371000.0
 
-_compiled_slack = torch.compile(_slack_kernel_haversine, mode='reduce-overhead', dynamic=True)
+
+def _unit_sphere_embedding(lat_deg: torch.Tensor, lon_deg: torch.Tensor) -> torch.Tensor:
+    """Return unit-sphere embedding (x, y, z) for lat/lon in degrees."""
+    lat_rad = torch.deg2rad(lat_deg)
+    lon_rad = torch.deg2rad(lon_deg)
+    cos_lat = torch.cos(lat_rad)
+    sin_lat = torch.sin(lat_rad)
+    return torch.stack(
+        (
+            cos_lat * torch.cos(lon_rad),
+            cos_lat * torch.sin(lon_rad),
+            sin_lat,
+        ),
+        dim=1,
+    )
+
+
+def _prepare_haversine_cache(xA: torch.Tensor, xB: torch.Tensor, R: float = _EARTH_RADIUS_METERS):
+    """
+    Precompute unit-sphere embeddings for A and B once so each slack tile
+    can reuse them without re-evaluating trig functions.
+    """
+    target_dtype = xA.dtype
+    EA = _unit_sphere_embedding(xA[:, 1], xA[:, 0]).to(dtype=target_dtype)
+    EB = _unit_sphere_embedding(xB[:, 1], xB[:, 0]).to(dtype=target_dtype)
+    EA = EA.contiguous()
+    EB = EB.contiguous()
+    return {
+        "EA": EA,
+        "EB": EB,
+        "EA_T": EA.transpose(0, 1).contiguous(),
+        "R": torch.tensor(R, device=xA.device, dtype=target_dtype),
+    }
+
+
+def _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int=None):
+    if geo_cache is None:
+        raise ValueError("geo_cache must be provided for Haversine slack computation.")
+
+    EA_T = geo_cache["EA_T"]
+    EB = geo_cache["EB"]
+    R = geo_cache["R"]
+
+    EB_tile = EB.index_select(0, idxB)
+    cos_angles = EB_tile @ EA_T
+    cos_angles = torch.clamp(cos_angles, -1.0, 1.0)
+    distances = R * torch.acos(cos_angles)
+
+    yB_idx = yB.index_select(0, idxB).to(distances.dtype)
+    yA_all = yA.to(distances.dtype)
+    delta_val = float(delta)
+    slack_float = distances - yB_idx.unsqueeze(1) - yA_all.unsqueeze(0) - delta_val
+
+    scaled = (3.0 * slack_float) / (float(C) * delta_val)
+    slack_int = torch.floor(scaled).to(torch.int64)
+    if cmax_int is not None:
+        slack_int = torch.clamp_max(slack_int, int(cmax_int))
+    return slack_int
 
 
 def unique(x, input_sorted = False):
@@ -66,34 +80,28 @@ def unique(x, input_sorted = False):
     return unique, unique_ind
 
 def compute_slack_tile(
-    idxB, 
-    xA, 
-    xB, 
-    yA, 
-    yB, 
+    idxB,
+    xA,
+    xB,
+    yA,
+    yB,
     C,
     delta,
     slack_tile=None,
+    geo_cache=None,
     tile_times=None,
     xAT=None,
     xa2_cached=None,
-    cmax_int=None
+    cmax_int=None,
 ):
     current_k = len(idxB)
     
     if slack_tile is not None and current_k <= slack_tile.shape[0]:
-        # Reuse pre-allocated tensor - use compiled fused kernel
+        # Reuse pre-allocated tensor
         slack_view = slack_tile[:current_k]
         
         # Extract lat/lon coordinates
-        latB = xB.index_select(0, idxB)[:, 1]  # latitude is second column
-        lonB = xB.index_select(0, idxB)[:, 0]  # longitude is first column
-        latA = xA[:, 1]  # latitude is second column
-        lonA = xA[:, 0]  # longitude is first column
-        yB_idx = yB.index_select(0, idxB)      # [K]
-        
-        # Call compiled Haversine kernel
-        slack_int64 = _compiled_slack(latB, lonB, latA, lonA, yA, yB_idx, C, delta, cmax_int)
+        slack_int64 = _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int)
         slack_view.copy_(slack_int64)
 
         # === NYC time mask (vectorized on GPU) ===
@@ -107,16 +115,8 @@ def compute_slack_tile(
         # === end time mask ===
         return slack_view  # [current_k,N] int64
     else:
-        # Fallback branch - use compiled fused kernel
-        # Extract lat/lon coordinates
-        latB = xB.index_select(0, idxB)[:, 1]  # latitude is second column
-        lonB = xB.index_select(0, idxB)[:, 0]  # longitude is first column
-        latA = xA[:, 1]  # latitude is second column
-        lonA = xA[:, 0]  # longitude is first column
-        yB_idx = yB.index_select(0, idxB)      # [K]
-        
-        # Call compiled Haversine kernel
-        slack = _compiled_slack(latB, lonB, latA, lonA, yA, yB_idx, C, delta, cmax_int)
+        # Fallback branch when we cannot reuse the pre-allocated tile
+        slack = _compute_haversine_slack(idxB, yA, yB, C, delta, geo_cache, cmax_int)
 
         # === NYC time mask (vectorized on GPU) ===
         times = tile_times if tile_times is not None else ((_tA_global), (_tB_global))
@@ -172,6 +172,8 @@ def spef_matching_2(
     f_threshold = stopping_condition if stopping_condition is not None else m*delta/C
     torch.manual_seed(seed)
     
+    geo_cache = _prepare_haversine_cache(xA, xB)
+    
     # Note: Haversine doesn't need precomputed caches like Euclidean
     xAT = None  # Not used for Haversine
     xa2_cached = None  # Not used for Haversine
@@ -203,7 +205,20 @@ def spef_matching_2(
                 start_event.record()
             else:
                 t0 = time.perf_counter()
-            slack_tile_used = compute_slack_tile(ind_b_free, xA, xB, yA, yB, C, delta, slack_tile, xAT=xAT, xa2_cached=xa2_cached, cmax_int=cmax_int)
+            slack_tile_used = compute_slack_tile(
+                ind_b_free,
+                xA,
+                xB,
+                yA,
+                yB,
+                C,
+                delta,
+                slack_tile,
+                geo_cache=geo_cache,
+                xAT=xAT,
+                xa2_cached=xa2_cached,
+                cmax_int=cmax_int,
+            )
             if device.type == "cuda":
                 end_event.record()
                 torch.cuda.synchronize()
