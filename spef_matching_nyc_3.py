@@ -291,10 +291,6 @@ def spef_matching_2(
             tile_updates_total += update_elapsed
             inner_loops_count += 1
 
-            print(
-                f"[perf] iter={iteration} tile_start={start_idx} size={len(ind_b_free)} "
-                f"slack={slack_elapsed:.4f}s update={update_elapsed:.4f}s free_B={f}"
-            )
         
         iteration += 1
 

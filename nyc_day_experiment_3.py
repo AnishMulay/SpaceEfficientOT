@@ -248,6 +248,25 @@ def main():
     print(f"Total matching cost: {matching_cost:.2f}")
     print(f"Timing metrics: {timing_metrics}")
 
+    # Additional human-readable summaries
+    total_cost_m = float(matching_cost)
+    total_cost_km = total_cost_m / 1000.0
+    feasible_matches = timing_metrics.get("feasible_matches", 0)
+    free_b = timing_metrics.get("free_B", 0)
+
+    if feasible_matches > 0:
+        avg_cost_m = total_cost_m / feasible_matches
+        avg_cost_km = avg_cost_m / 1000.0
+        print(f"Total matching cost (km): {total_cost_km:.2f}")
+        print(
+            f"Average matching cost per feasible edge: {avg_cost_m:.2f} m ({avg_cost_km:.4f} km)"
+        )
+    else:
+        print(f"Total matching cost (km): {total_cost_km:.2f}")
+        print("Average matching cost per feasible edge: undefined (no feasible matches)")
+
+    print(f"Feasible matches: {feasible_matches}, Free B nodes: {free_b}")
+
 
 if __name__ == "__main__":
     main()
