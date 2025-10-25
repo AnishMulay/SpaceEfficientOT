@@ -29,3 +29,13 @@ class Problem:
     def m(self) -> int:
         """Number of points on the B side."""
         return int(self.xB.shape[0])
+
+    @property
+    def C_value(self) -> float:
+        """Scalar value of C as a Python float."""
+        return float(torch.as_tensor(self.C, device=self.device, dtype=torch.float64).item())
+
+    @property
+    def delta_value(self) -> float:
+        """Scalar value of delta as a Python float."""
+        return float(torch.as_tensor(self.delta, device=self.device, dtype=torch.float64).item())

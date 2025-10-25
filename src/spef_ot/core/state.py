@@ -19,3 +19,4 @@ class SolverState:
     Mb: torch.Tensor | None = None
     iteration: int = 0
     metrics: dict[str, float] = field(default_factory=dict)
+    generator: torch.Generator | None = None
