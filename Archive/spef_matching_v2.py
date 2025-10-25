@@ -6,7 +6,8 @@ def _slack_kernel(xb, xAT, xa2_cached, yA, yB_idx, C, delta):
     """Fused slack computation: w = xb2 + xa2 - 2*(xb @ xAT), then scale/floor/cast, then broadcast subtract"""
     xb2 = (xb * xb).sum(dim=1, keepdim=True)  # [K,1]
     w = xb2 + xa2_cached - 2.0 * (xb @ xAT)   # [K,N]
-    scaled = (3.0 * w) / (C.to(w.dtype) * float(delta))  # [K,N]
+    C_tensor = torch.as_tensor(C, device=w.device, dtype=w.dtype)
+    scaled = (3.0 * w) / (C_tensor * float(delta))  # [K,N]
     c_tile = torch.floor(scaled).to(torch.int64)  # [K,N]
     return c_tile - yA.unsqueeze(0) - yB_idx.unsqueeze(1)  # [K,N]
 
