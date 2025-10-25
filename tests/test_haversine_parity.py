@@ -41,7 +41,7 @@ class HaversineParityTest(unittest.TestCase):
         C = 5.0
         delta = 1.0
         k = 4
-        device = "cpu"
+        device = torch.device("cpu")
         seed = 7
         cmax_int = 5000
 
