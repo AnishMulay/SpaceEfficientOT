@@ -166,6 +166,21 @@ def _resolve_config(args: argparse.Namespace) -> ExperimentConfig:
     return config
 
 
+def _resolve_paths(config: ExperimentConfig) -> ExperimentConfig:
+    input_path = Path(config.input)
+    if not input_path.is_absolute():
+        input_path = (EXPERIMENT_DIR / input_path).resolve()
+
+    out_path = config.out
+    if out_path is not None:
+        out_obj = Path(out_path)
+        if not out_obj.is_absolute():
+            out_obj = (EXPERIMENT_DIR / out_obj).resolve()
+        out_path = str(out_obj)
+
+    return replace(config, input=str(input_path), out=out_path)
+
+
 def main() -> None:
     parser = _build_parser()
     if len(sys.argv) > 1:
@@ -174,7 +189,7 @@ def main() -> None:
         # No CLI args – run with in-file defaults
         args = parser.parse_args([])
 
-    config = _resolve_config(args)
+    config = _resolve_paths(_resolve_config(args))
 
     device = (
         torch.device(config.device)
