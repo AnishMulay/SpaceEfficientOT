@@ -20,9 +20,14 @@ torch.set_float32_matmul_precision("high")
 
 from spef_ot import MatchResult, match  # noqa: E402
 
-from .estimate_c import estimate_c  # noqa: E402
-from .loader import load_day  # noqa: E402
-from .prepare import prepare_tensors  # noqa: E402
+try:
+    from .estimate_c import estimate_c  # type: ignore[attr-defined] # noqa: E402
+    from .loader import load_day  # type: ignore[attr-defined] # noqa: E402
+    from .prepare import prepare_tensors  # type: ignore[attr-defined] # noqa: E402
+except ImportError:  # pragma: no cover - script execution fallback
+    from experiments.nyc_taxi.estimate_c import estimate_c  # noqa: E402
+    from experiments.nyc_taxi.loader import load_day  # noqa: E402
+    from experiments.nyc_taxi.prepare import prepare_tensors  # noqa: E402
 
 
 def _run_solver(
