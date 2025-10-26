@@ -16,18 +16,17 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+EXPERIMENT_DIR = Path(__file__).resolve().parent
+if str(EXPERIMENT_DIR) not in sys.path:
+    sys.path.insert(0, str(EXPERIMENT_DIR))
+
 torch.set_float32_matmul_precision("high")
 
 from spef_ot import MatchResult, match  # noqa: E402
 
-try:
-    from .estimate_c import estimate_c  # type: ignore[attr-defined] # noqa: E402
-    from .loader import load_day  # type: ignore[attr-defined] # noqa: E402
-    from .prepare import prepare_tensors  # type: ignore[attr-defined] # noqa: E402
-except ImportError:  # pragma: no cover - script execution fallback
-    from experiments.nyc_taxi.estimate_c import estimate_c  # noqa: E402
-    from experiments.nyc_taxi.loader import load_day  # noqa: E402
-    from experiments.nyc_taxi.prepare import prepare_tensors  # noqa: E402
+from estimate_c import estimate_c  # noqa: E402
+from loader import load_day  # noqa: E402
+from prepare import prepare_tensors  # noqa: E402
 
 
 def _run_solver(
@@ -238,16 +237,16 @@ if __name__ == "__main__":
     main()
 @dataclass
 class ExperimentConfig:
-    input: str = "experiments/nyc_taxi/data/nyc_taxi_day.parquet"
-    date: str = "2014-01-01"
-    n: int | None = None
-    random_sample: bool = False
+    input: str = "./data/nyc_taxi_day.parquet"
+    date: str = "2014-14-10"
+    n: int | None = 10000
+    random_sample: bool = True
     seed: int = 1
-    device: str | None = None
+    device: str | None = cuda
     k: int = 512
     delta: float = 0.01
-    cmax: int | None = None
-    stopping_condition: int | None = None
+    cmax: int | None = 5
+    stopping_condition: int | None = 1000
     c_sample: int = 64
     c_multiplier: float = 4.0
     out: str | None = None
