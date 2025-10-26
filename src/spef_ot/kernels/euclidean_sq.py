@@ -75,13 +75,50 @@ class SquaredEuclideanKernel(SlackKernel):
         workspace: _EuclideanWorkspace,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if idxB.numel() == 0:
+        K_actual = int(idxB.numel())
+        if K_actual == 0:
             return out[:0] if out is not None else state.yA.new_empty((0, workspace.xA.shape[0]))
 
-        xb = workspace.xB.index_select(0, idxB).to(dtype=workspace.xA.dtype)
-        yB_idx = state.yB.index_select(0, idxB)
+        if out is None:
+            # No prealloc provided; compute at actual size.
+            xb = workspace.xB.index_select(0, idxB).to(dtype=workspace.xA.dtype)
+            yB_idx = state.yB.index_select(0, idxB)
+            slack = _compiled_slack_kernel(
+                xb,
+                workspace.xAT,
+                workspace.xa2_cached,
+                state.yA,
+                yB_idx,
+                workspace.scale,
+            )
+            return slack
 
-        slack = _compiled_slack_kernel(
+        # Use constant-K execution by padding to out.shape[0]
+        K_target = int(out.shape[0])
+        if K_target == K_actual:
+            xb = workspace.xB.index_select(0, idxB).to(dtype=workspace.xA.dtype)
+            yB_idx = state.yB.index_select(0, idxB)
+            slack = _compiled_slack_kernel(
+                xb,
+                workspace.xAT,
+                workspace.xa2_cached,
+                state.yA,
+                yB_idx,
+                workspace.scale,
+            )
+            out_view = out[:K_actual]
+            out_view.copy_(slack)
+            return out_view
+
+        # Pad indices to K_target by repeating the last valid index
+        pad_count = K_target - K_actual
+        last_idx = idxB[-1]
+        idxB_padded = torch.cat((idxB, last_idx.repeat(pad_count)))
+
+        xb = workspace.xB.index_select(0, idxB_padded).to(dtype=workspace.xA.dtype)
+        yB_idx = state.yB.index_select(0, idxB_padded)
+
+        slack_k = _compiled_slack_kernel(
             xb,
             workspace.xAT,
             workspace.xa2_cached,
@@ -89,13 +126,8 @@ class SquaredEuclideanKernel(SlackKernel):
             yB_idx,
             workspace.scale,
         )
-
-        if out is not None and out.shape[0] >= slack.shape[0]:
-            out_view = out[: slack.shape[0]]
-            out_view.copy_(slack)
-            return out_view
-
-        return slack
+        out.copy_(slack_k)
+        return out[:K_actual]
 
     def pair_cost(
         self,

@@ -106,8 +106,8 @@ def match(
             if idxB.numel() == 0:
                 continue
 
-            tile_view = slack_tile[: idxB.numel()]
-            slack_values = kernel_instance.compute_slack_tile(idxB, state, workspace, out=tile_view)
+            # Pass the full preallocated buffer to enable constant-K execution
+            slack_values = kernel_instance.compute_slack_tile(idxB, state, workspace, out=slack_tile)
 
             zero_rows, zero_cols = torch.where(slack_values == 0)
 

@@ -167,23 +167,72 @@ class HaversineKernel(SlackKernel):
         workspace: _HaversineWorkspace,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        current_k = idxB.numel()
-        if current_k == 0:
-            if out is not None:
-                return out[:0]
-            return state.yA.new_empty((0, workspace.xA_deg.shape[0]))
+        K_actual = int(idxB.numel())
+        if K_actual == 0:
+            return out[:0] if out is not None else state.yA.new_empty((0, workspace.xA_deg.shape[0]))
 
-        xb = workspace.xB_deg.index_select(0, idxB).to(dtype=workspace.xA_deg.dtype)
-        yB_idx = state.yB.index_select(0, idxB)
+        if out is None:
+            xb = workspace.xB_deg.index_select(0, idxB).to(dtype=workspace.xA_deg.dtype)
+            yB_idx = state.yB.index_select(0, idxB)
+            if workspace.apply_mask:
+                tB_tile = workspace.times_B.index_select(0, idxB)
+                tA = workspace.times_A
+            else:
+                tB_tile = yB_idx.new_zeros(K_actual, dtype=torch.int64)
+                tA = state.yA.new_zeros(workspace.xA_deg.shape[0], dtype=torch.int64)
+            slack = _compiled_haversine_slack(
+                xb,
+                workspace.xA_rad,
+                state.yA,
+                yB_idx,
+                workspace.scale,
+                tA,
+                tB_tile,
+                workspace.apply_mask,
+                workspace.cmax_int,
+            )
+            return slack
 
+        K_target = int(out.shape[0])
+        if K_target == K_actual:
+            xb = workspace.xB_deg.index_select(0, idxB).to(dtype=workspace.xA_deg.dtype)
+            yB_idx = state.yB.index_select(0, idxB)
+            if workspace.apply_mask:
+                tB_tile = workspace.times_B.index_select(0, idxB)
+                tA = workspace.times_A
+            else:
+                tB_tile = yB_idx.new_zeros(K_actual, dtype=torch.int64)
+                tA = state.yA.new_zeros(workspace.xA_deg.shape[0], dtype=torch.int64)
+            slack = _compiled_haversine_slack(
+                xb,
+                workspace.xA_rad,
+                state.yA,
+                yB_idx,
+                workspace.scale,
+                tA,
+                tB_tile,
+                workspace.apply_mask,
+                workspace.cmax_int,
+            )
+            out_view = out[:K_actual]
+            out_view.copy_(slack)
+            return out_view
+
+        # Pad to K_target by repeating last index; compute once and return slice
+        pad_count = K_target - K_actual
+        last_idx = idxB[-1]
+        idxB_padded = torch.cat((idxB, last_idx.repeat(pad_count)))
+
+        xb = workspace.xB_deg.index_select(0, idxB_padded).to(dtype=workspace.xA_deg.dtype)
+        yB_idx = state.yB.index_select(0, idxB_padded)
         if workspace.apply_mask:
-            tB_tile = workspace.times_B.index_select(0, idxB)
+            tB_tile = workspace.times_B.index_select(0, idxB_padded)
             tA = workspace.times_A
         else:
-            tB_tile = yB_idx.new_zeros(current_k, dtype=torch.int64)
+            tB_tile = yB_idx.new_zeros(K_target, dtype=torch.int64)
             tA = state.yA.new_zeros(workspace.xA_deg.shape[0], dtype=torch.int64)
 
-        slack = _compiled_haversine_slack(
+        slack_k = _compiled_haversine_slack(
             xb,
             workspace.xA_rad,
             state.yA,
@@ -194,13 +243,8 @@ class HaversineKernel(SlackKernel):
             workspace.apply_mask,
             workspace.cmax_int,
         )
-
-        if out is not None and out.shape[0] >= slack.shape[0]:
-            out_view = out[: slack.shape[0]]
-            out_view.copy_(slack)
-            return out_view
-
-        return slack
+        out.copy_(slack_k)
+        return out[:K_actual]
 
     def pair_cost(
         self,
