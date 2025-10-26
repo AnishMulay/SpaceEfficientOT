@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from .loader import ColumnMapping
+from loader import ColumnMapping
 
 
 def _to_unix_seconds(series: pd.Series) -> np.ndarray:
