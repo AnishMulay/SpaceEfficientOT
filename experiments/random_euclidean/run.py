@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -16,7 +17,10 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+torch.set_float32_matmul_precision("high")
+
 from spef_ot import match  # noqa: E402
+from spef_ot.kernels.euclidean_sq import SquaredEuclideanKernel  # noqa: E402
 
 
 def generate_points(n: int, d: int, device: torch.device, seed: int, cache: bool = True):
@@ -50,34 +54,60 @@ def compute_C(xa: torch.Tensor, xb: torch.Tensor) -> torch.Tensor:
     return dists.max() ** 2
 
 
-def run_once(n: int, d: int, k: int, delta: float, seed: int, device: torch.device):
-    xa, xb = generate_points(n, d, device, seed, cache=True)
-    C = compute_C(xa, xb)
-
+def _run_match(
+    xa: torch.Tensor,
+    xb: torch.Tensor,
+    C,
+    k: int,
+    delta: float,
+    seed: int,
+    device: torch.device,
+    kernel,
+):
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.perf_counter()
-
     result = match(
         xa,
         xb,
-        kernel="euclidean_sq",
+        kernel=kernel,
         C=C,
         k=k,
         delta=delta,
         device=device,
         seed=seed,
     )
-
     if device.type == "cuda":
         torch.cuda.synchronize()
     t1 = time.perf_counter()
+    return result, t1 - t0
 
-    runtime = t1 - t0
+
+def run_once(
+    n: int,
+    d: int,
+    k: int,
+    delta: float,
+    seed: int,
+    device: torch.device,
+    *,
+    debug: bool = False,
+):
+    xa, xb = generate_points(n, d, device, seed, cache=True)
+    C = compute_C(xa, xb)
+
+    kernel_spec = InstrumentedEuclideanKernel if debug else "euclidean_sq"
+
+    # Warm-up run to amortize compile / cudagraph setup
+    _, warmup_time = _run_match(xa, xb, C, k, delta, seed, device, kernel_spec)
+
+    # Measured run (fresh instance for debug metrics)
+    result, runtime = _run_match(xa, xb, C, k, delta, seed, device, kernel_spec)
+
     matching_cost = float(result.matching_cost)
     cost_per_n = matching_cost / n
 
-    return {
+    output = {
         "algorithm": "spef_ot.match(euclidean_sq)",
         "n": n,
         "d": d,
@@ -85,6 +115,7 @@ def run_once(n: int, d: int, k: int, delta: float, seed: int, device: torch.devi
         "delta": delta,
         "seed": seed,
         "device": str(device),
+        "warmup_runtime": warmup_time,
         "runtime": runtime,
         "matching_cost": matching_cost,
         "cost_per_n": cost_per_n,
@@ -92,6 +123,11 @@ def run_once(n: int, d: int, k: int, delta: float, seed: int, device: torch.devi
         "C": float(C),
         "metrics": result.metrics,
     }
+
+    if debug:
+        output["debug"] = result.metrics.get("debug", {})
+
+    return output
 
 
 def main():
@@ -103,6 +139,7 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default=None, help="cpu or cuda")
     p.add_argument("--out", type=str, default=None, help="Optional JSON output path")
+    p.add_argument("--debug", action="store_true", help="Collect tile/device diagnostics")
     args = p.parse_args()
 
     device = (
@@ -116,7 +153,7 @@ def main():
     print(f"Device: {device}")
     print("=" * 60)
 
-    res = run_once(args.n, args.d, args.k, args.delta, args.seed, device)
+    res = run_once(args.n, args.d, args.k, args.delta, args.seed, device, debug=args.debug)
 
     print("RESULTS:")
     print(json.dumps(res, indent=2))
@@ -132,3 +169,42 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+class InstrumentedEuclideanKernel(SquaredEuclideanKernel):
+    """Kernel wrapper that records tile sizes and argument devices."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._tile_sizes = defaultdict(int)
+        self._cpu_args = set()
+
+    def compute_slack_tile(self, idxB, state, workspace, out=None):  # noqa: D401
+        current_k = int(idxB.numel())
+        self._tile_sizes[current_k] += 1
+
+        device_map = {
+            "idxB": idxB.device,
+            "xA": workspace.xA.device,
+            "xB": workspace.xB.device,
+            "xAT": workspace.xAT.device,
+            "xa2_cached": workspace.xa2_cached.device,
+            "scale": workspace.scale.device,
+            "yA": state.yA.device,
+            "yB": state.yB.device,
+        }
+        for name, device in device_map.items():
+            if device.type != "cuda":
+                self._cpu_args.add(f"{name}:{device.type}")
+
+        return super().compute_slack_tile(idxB, state, workspace, out=out)
+
+    def finalize(self, problem, state, workspace):  # noqa: D401
+        metrics = super().finalize(problem, state, workspace) or {}
+        diagnostics = {
+            "unique_tile_sizes": len(self._tile_sizes),
+            "tile_sizes": {str(k): v for k, v in sorted(self._tile_sizes.items())},
+            "cpu_args": sorted(self._cpu_args),
+        }
+        combined = dict(metrics)
+        combined["debug"] = diagnostics
+        return combined
