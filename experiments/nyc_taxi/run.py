@@ -28,6 +28,53 @@ from estimate_c import estimate_c  # noqa: E402
 from loader import load_day  # noqa: E402
 from prepare import prepare_tensors  # noqa: E402
 
+@dataclass
+class ExperimentConfig:
+    input: str = "./data/nyc_taxi_day.parquet"
+    date: str = "2014-14-10"
+    n: int | None = 10000
+    random_sample: bool = True
+    seed: int = 1
+    device: str | None = 'cuda'
+    k: int = 512
+    delta: float = 0.01
+    cmax: int | None = 5
+    stopping_condition: int | None = 1000
+    c_sample: int = 64
+    c_multiplier: float = 4.0
+    out: str | None = None
+
+
+DEFAULT_CONFIG = ExperimentConfig()
+
+
+def _load_config_from_json(path: Path, base: ExperimentConfig) -> ExperimentConfig:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("Config JSON must contain an object at the top level")
+    merged = asdict(base)
+    for key, value in data.items():
+        if key in merged:
+            merged[key] = value
+    return ExperimentConfig(**merged)
+
+
+def _apply_overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
+    updates: dict[str, object] = {}
+    for field in fields(ExperimentConfig):
+        name = field.name
+        if not hasattr(args, name):
+            continue
+        value = getattr(args, name)
+        if value is None:
+            continue
+        updates[name] = value
+    if not updates:
+        return config
+    return replace(config, **updates)
 
 def _run_solver(
     *,
@@ -235,24 +282,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-@dataclass
-class ExperimentConfig:
-    input: str = "./data/nyc_taxi_day.parquet"
-    date: str = "2014-14-10"
-    n: int | None = 10000
-    random_sample: bool = True
-    seed: int = 1
-    device: str | None = cuda
-    k: int = 512
-    delta: float = 0.01
-    cmax: int | None = 5
-    stopping_condition: int | None = 1000
-    c_sample: int = 64
-    c_multiplier: float = 4.0
-    out: str | None = None
-
-
-DEFAULT_CONFIG = ExperimentConfig()
 
 
 def _load_config_from_json(path: Path, base: ExperimentConfig) -> ExperimentConfig:
