@@ -48,6 +48,7 @@ def match(
     delta: Union[float, torch.Tensor] = 1.0,
     device: Union[str, torch.device, None] = None,
     seed: int = 1,
+    stopping_condition: int | None = None,
     **kernel_kwargs: Any,
 ) -> MatchResult:
     """
@@ -90,7 +91,12 @@ def match(
     slack_tile = torch.empty((k, problem.n), dtype=torch.int64, device=torch_device)
 
     f = float(problem.n)
-    f_threshold = problem.m * problem.delta_value / problem.C_value
+    default_threshold = problem.m * problem.delta_value / problem.C_value
+    f_threshold = (
+        float(stopping_condition)
+        if stopping_condition is not None
+        else default_threshold
+    )
 
     inner_loops = 0
 
