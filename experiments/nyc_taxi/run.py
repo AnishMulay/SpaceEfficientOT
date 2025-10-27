@@ -43,6 +43,7 @@ class ExperimentConfig:
     c_sample: int = 64
     c_multiplier: float = 4.0
     out: str | None = None
+    no_warmup: bool = False
 
 
 DEFAULT_CONFIG = ExperimentConfig()
@@ -154,6 +155,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Multiplier applied to max sampled distance",
     )
     parser.add_argument("--out", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument(
+        "--no-warmup",
+        dest="no_warmup",
+        action="store_true",
+        default=None,
+        help="Skip the initial warm-up run",
+    )
     return parser
 
 
@@ -216,19 +224,21 @@ def main() -> None:
     )
 
     # Warm-up run (amortize compilation/graph capture)
-    _, warmup_time = _run_solver(
-        xA=xA,
-        xB=xB,
-        C=C,
-        k=config.k,
-        delta=config.delta,
-        device=device,
-        seed=config.seed,
-        times_A=tA,
-        times_B=tB,
-        cmax_int=config.cmax,
-        stopping_condition=config.stopping_condition,
-    )
+    warmup_time = 0.0
+    if not config.no_warmup:
+        _, warmup_time = _run_solver(
+            xA=xA,
+            xB=xB,
+            C=C,
+            k=config.k,
+            delta=config.delta,
+            device=device,
+            seed=config.seed,
+            times_A=tA,
+            times_B=tB,
+            cmax_int=config.cmax,
+            stopping_condition=config.stopping_condition,
+        )
 
     # Timed run with fresh state
     result, runtime = _run_solver(

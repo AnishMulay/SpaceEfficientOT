@@ -55,6 +55,7 @@ class ExperimentConfig:
     preview_count: int = 5
     verbose: bool = True
     out: str | None = None
+    no_warmup: bool = False
 
 
 DEFAULT_CONFIG = ExperimentConfig()
@@ -238,6 +239,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable detailed progress logging (per-iteration + tiles)",
     )
     parser.add_argument("--out", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument(
+        "--no-warmup",
+        dest="no_warmup",
+        action="store_true",
+        default=None,
+        help="Skip the initial warm-up run",
+    )
     return parser
 
 
@@ -362,27 +370,30 @@ def main() -> None:
         "Solver parameters: "
         f"k={config.k}, delta={config.delta}, stopping_condition={config.stopping_condition}"
     )
-
-    _, warmup_time = _run_solver(
-        xA=xA,
-        xB=xB,
-        C=C,
-        k=config.k,
-        delta=config.delta,
-        device=device,
-        seed=config.seed,
-        times_A=tA,
-        times_B=tB,
-        stopping_condition=config.stopping_condition,
-        speed_mps=config.speed_mps,
-        y_max_meters=config.y_max_meters,
-        future_only=bool(config.future_only),
-        fill_policy=config.fill_policy,
-        progress_callback=None,
-    )
-    log(f"Warmup run completed in {warmup_time:.4f} s")
-    if not config.verbose:
-        log("Per-iteration solver logging is disabled. Re-run with --verbose to stream progress details.")
+    warmup_time = 0.0
+    if not config.no_warmup:
+        _, warmup_time = _run_solver(
+            xA=xA,
+            xB=xB,
+            C=C,
+            k=config.k,
+            delta=config.delta,
+            device=device,
+            seed=config.seed,
+            times_A=tA,
+            times_B=tB,
+            stopping_condition=config.stopping_condition,
+            speed_mps=config.speed_mps,
+            y_max_meters=config.y_max_meters,
+            future_only=bool(config.future_only),
+            fill_policy=config.fill_policy,
+            progress_callback=None,
+        )
+        log(f"Warmup run completed in {warmup_time:.4f} s")
+        if not config.verbose:
+            log("Per-iteration solver logging is disabled. Re-run with --verbose to stream progress details.")
+    else:
+        log("Skipping warm-up run (--no-warmup)")
 
     def progress_callback(event: str, payload: dict[str, Any]) -> None:
         if event == "iteration":
