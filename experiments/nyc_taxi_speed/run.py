@@ -37,7 +37,7 @@ from prepare import prepare_tensors  # noqa: E402
 
 @dataclass
 class ExperimentConfig:
-    input: str = "./data/nyc_taxi_day.parquet"
+    input: str = "./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv"
     date: str = "2014-10-14"
     n: int | None = 10000
     random_sample: bool = True
@@ -46,14 +46,14 @@ class ExperimentConfig:
     k: int = 512
     delta: float = 0.01
     stopping_condition: int | None = 1000
-    c_sample: int = 64
-    c_multiplier: float = 4.0
+    c_sample: int = 1
+    c_multiplier: float = 1.0
     speed_mps: float | None = 8.0
-    y_max_meters: float | None = 3000.0
+    y_max_meters: float | None = 100000.0
     future_only: bool = True
     fill_policy: str = "none"
     preview_count: int = 5
-    verbose: bool = False
+    verbose: bool = True
     out: str | None = None
 
 
@@ -363,6 +363,8 @@ def main() -> None:
         progress_callback=None,
     )
     log(f"Warmup run completed in {warmup_time:.4f} s")
+    if not config.verbose:
+        log("Per-iteration solver logging is disabled. Re-run with --verbose to stream progress details.")
 
     def progress_callback(event: str, payload: dict[str, Any]) -> None:
         if event == "iteration":

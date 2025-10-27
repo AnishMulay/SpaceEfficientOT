@@ -307,7 +307,7 @@ class HaversineSpeedKernel(SlackKernel):
                 mask_ymax = torch.zeros_like(dist, dtype=torch.bool)
 
             if violation_mask.any():
-                bad_idx = torch.nonzero(violation_mask, as_tuple=False).squeeze(1)
+                bad_idx = torch.nonzero(violation_mask, as_tuple=False).reshape(-1)
                 bad_rows = rows.index_select(0, bad_idx)
                 bad_cols = cols.index_select(0, bad_idx)
                 state.Mb[bad_rows] = -1
