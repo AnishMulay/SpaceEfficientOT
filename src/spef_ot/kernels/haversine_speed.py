@@ -292,11 +292,12 @@ class HaversineSpeedKernel(SlackKernel):
             rows = torch.nonzero(matched_mask, as_tuple=False).squeeze(1)
             cols = state.Mb.index_select(0, rows)
 
-            xb = workspace.xB_deg.index_select(0, rows).to(dtype=torch.float64)
-            xa = workspace.xA_deg.index_select(0, cols).to(dtype=torch.float64)
-            xb_rad = torch.deg2rad(xb)
-            xa_rad = torch.deg2rad(xa)
-            dist = _haversine_distance(xb_rad, xa_rad).to(torch.float64)
+            # Compute great-circle distances using the same GEMM-based approach
+            EB_rows = workspace.EB.index_select(0, rows).to(dtype=torch.float64)
+            EA_cols = workspace.EA_T.transpose(0, 1).index_select(0, cols).to(dtype=torch.float64)
+            cos_vals = (EB_rows * EA_cols).sum(dim=1)
+            cos_vals = torch.clamp(cos_vals, -1.0, 1.0)
+            dist = torch.acos(cos_vals) * float(workspace.radius_m)
 
             violation_mask = torch.zeros_like(dist, dtype=torch.bool)
 
@@ -314,13 +315,8 @@ class HaversineSpeedKernel(SlackKernel):
             else:
                 mask_future = torch.zeros_like(dist, dtype=torch.bool)
 
-            if workspace.use_speed and dt is not None:
-                time_limit = dist / workspace.speed_mps
-                mask_speed = dt.to(dist.dtype) < time_limit
-                violation_mask |= mask_speed
-                removed_by_speed = int(mask_speed.sum().item())
-            else:
-                mask_speed = torch.zeros_like(dist, dtype=torch.bool)
+            # Speed-based removal disabled per request; keep metric at 0
+            mask_speed = torch.zeros_like(dist, dtype=torch.bool)
 
             if workspace.use_ymax:
                 mask_ymax = dist >= workspace.y_max_m
