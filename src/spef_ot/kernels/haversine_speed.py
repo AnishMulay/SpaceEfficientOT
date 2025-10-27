@@ -7,6 +7,7 @@ import torch
 
 from .base import SlackKernel, Workspace
 from .haversine import _haversine_distance
+from .haversine import _EARTH_RADIUS_METERS
 from .registry import register_kernel
 from ..core.problem import Problem
 from ..core.state import SolverState
@@ -29,8 +30,9 @@ def _coerce_optional_tensor(
 
 
 def _raw_haversine_speed_slack(
-    xb_deg: torch.Tensor,
-    xA_rad: torch.Tensor,
+    EB_tile: torch.Tensor,
+    EA_T: torch.Tensor,
+    radius_m: float,
     yA: torch.Tensor,
     yB_idx: torch.Tensor,
     scale: torch.Tensor,
@@ -43,8 +45,11 @@ def _raw_haversine_speed_slack(
     y_max_m: float,
     inf_m: float,
 ) -> torch.Tensor:
-    xb_rad = torch.deg2rad(xb_deg)
-    dist_m = _haversine_distance(xb_rad, xA_rad).to(xb_deg.dtype)
+    # Pairwise great-circle distance via unit-sphere dot product
+    # cos(theta) = EB · EA; distances = R * arccos(cos(theta))
+    cos_angles = EB_tile @ EA_T  # [K, N]
+    cos_angles = torch.clamp(cos_angles, -1.0, 1.0)
+    dist_m = (torch.acos(cos_angles) * float(radius_m)).to(EB_tile.dtype)
 
     dt = tB_tile.view(-1, 1) - tA.view(1, -1)
 
@@ -86,7 +91,8 @@ else:  # pragma: no cover - older PyTorch fallback
 class _HaversineSpeedWorkspace:
     xA_deg: torch.Tensor
     xB_deg: torch.Tensor
-    xA_rad: torch.Tensor
+    EA_T: torch.Tensor
+    EB: torch.Tensor
     scale: torch.Tensor
     times_A: torch.Tensor
     times_B: torch.Tensor
@@ -97,6 +103,7 @@ class _HaversineSpeedWorkspace:
     speed_mps: float
     y_max_m: float
     inf_m: float
+    radius_m: float
 
 
 class HaversineSpeedKernel(SlackKernel):
@@ -134,7 +141,20 @@ class HaversineSpeedKernel(SlackKernel):
         xA = problem.xA.to(dtype=torch.float32)
         xB = problem.xB.to(dtype=torch.float32)
 
-        xA_rad = torch.deg2rad(xA)
+        # Precompute unit-sphere embeddings for lon/lat in degrees
+        def _embed_lonlat_deg(coords_deg: torch.Tensor) -> torch.Tensor:
+            lon_rad = torch.deg2rad(coords_deg[:, 0])
+            lat_rad = torch.deg2rad(coords_deg[:, 1])
+            cos_lat = torch.cos(lat_rad)
+            sin_lat = torch.sin(lat_rad)
+            x = cos_lat * torch.cos(lon_rad)
+            y = cos_lat * torch.sin(lon_rad)
+            z = sin_lat
+            return torch.stack((x, y, z), dim=1)
+
+        EA = _embed_lonlat_deg(xA).contiguous()
+        EB = _embed_lonlat_deg(xB).contiguous()
+        EA_T = EA.transpose(0, 1).contiguous()
         scale_value = 3.0 / (problem.C_value * problem.delta_value)
         scale = torch.tensor(scale_value, dtype=xA.dtype, device=problem.device)
 
@@ -180,7 +200,8 @@ class HaversineSpeedKernel(SlackKernel):
         return _HaversineSpeedWorkspace(
             xA_deg=xA,
             xB_deg=xB,
-            xA_rad=xA_rad,
+            EA_T=EA_T,
+            EB=EB,
             scale=scale,
             times_A=times_A,
             times_B=times_B,
@@ -191,6 +212,7 @@ class HaversineSpeedKernel(SlackKernel):
             speed_mps=speed_value,
             y_max_m=y_max_value,
             inf_m=inf_m,
+            radius_m=float(_EARTH_RADIUS_METERS),
         )
 
     def compute_slack_tile(
@@ -205,12 +227,13 @@ class HaversineSpeedKernel(SlackKernel):
             return out[:0] if out is not None else state.yA.new_empty((0, workspace.xA_deg.shape[0]))
 
         def _compute(idx: torch.Tensor, out_buf: Optional[torch.Tensor] = None) -> torch.Tensor:
-            xb = workspace.xB_deg.index_select(0, idx).to(dtype=workspace.xA_deg.dtype)
+            EB_tile = workspace.EB.index_select(0, idx)
             yB_idx = state.yB.index_select(0, idx)
             tB_tile = workspace.times_B.index_select(0, idx)
             slack = _compiled_haversine_speed_slack(
-                xb,
-                workspace.xA_rad,
+                EB_tile,
+                workspace.EA_T,
+                workspace.radius_m,
                 state.yA,
                 yB_idx,
                 workspace.scale,
@@ -248,11 +271,11 @@ class HaversineSpeedKernel(SlackKernel):
         problem: Problem,
         workspace: _HaversineSpeedWorkspace,
     ) -> torch.Tensor:
-        xb = workspace.xB_deg.index_select(0, rows).to(dtype=torch.float64)
-        xa = workspace.xA_deg.index_select(0, cols).to(dtype=torch.float64)
-        xb_rad = torch.deg2rad(xb)
-        xa_rad = torch.deg2rad(xa)
-        return _haversine_distance(xb_rad, xa_rad).to(torch.float64)
+        EB_rows = workspace.EB.index_select(0, rows).to(dtype=torch.float64)
+        EA_cols = workspace.EA_T.transpose(0, 1).index_select(0, cols).to(dtype=torch.float64)
+        cos_vals = (EB_rows * EA_cols).sum(dim=1)
+        cos_vals = torch.clamp(cos_vals, -1.0, 1.0)
+        return torch.acos(cos_vals) * float(workspace.radius_m)
 
     def finalize(
         self,

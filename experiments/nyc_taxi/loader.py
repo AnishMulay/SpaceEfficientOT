@@ -19,8 +19,10 @@ class ColumnMapping:
     dropoff_lat: str
 
 
-DEFAULT_LAT_RANGE = (40.0, 41.0)
-DEFAULT_LON_RANGE = (-75.0, -73.0)
+# Widened slightly to reduce accidental exclusion of valid outer-edges trips
+# around the NYC metro area while still filtering obvious outliers.
+DEFAULT_LAT_RANGE = (39.8, 41.2)
+DEFAULT_LON_RANGE = (-75.2, -72.8)
 
 
 def _resolve_columns(df: pd.DataFrame) -> ColumnMapping:

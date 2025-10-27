@@ -305,15 +305,16 @@ def main() -> None:
     preview_n = max(0, config.preview_count)
     if preview_n > 0:
         log(f"\nPreviewing first {min(preview_n, len(df))} trips (pickup -> dropoff):")
-        log("Idx | Pickup time           | Pickup (lon,lat)      | Dropoff (lon,lat)")
+        log("Idx | Pickup time           | Dropoff time          | Pickup (lon,lat)      | Dropoff (lon,lat)")
         for idx in range(min(preview_n, len(df))):
             pickup_time = df.iloc[idx][mapping.pickup_time]
+            dropoff_time = df.iloc[idx][mapping.dropoff_time]
             pickup_lon = df.iloc[idx][mapping.pickup_lon]
             pickup_lat = df.iloc[idx][mapping.pickup_lat]
             dropoff_lon = df.iloc[idx][mapping.dropoff_lon]
             dropoff_lat = df.iloc[idx][mapping.dropoff_lat]
             log(
-                f"{idx:3d} | {pickup_time} | "
+                f"{idx:3d} | {pickup_time} | {dropoff_time} | "
                 f"({pickup_lon:.6f}, {pickup_lat:.6f}) | "
                 f"({dropoff_lon:.6f}, {dropoff_lat:.6f})"
             )
@@ -327,6 +328,23 @@ def main() -> None:
         f"tA{tuple(tA.shape)}[{tA.dtype}], "
         f"tB{tuple(tB.shape)}[{tB.dtype}] on device {device}"
     )
+
+    # Post-prepare tensor preview
+    if preview_n > 0:
+        count = min(preview_n, xA.shape[0])
+        log(f"\nTensor preview (first {count} in order):")
+        log("Idx | xA(lon,lat)            | xB(lon,lat)            | tA (s)        | tB (s)")
+        for i in range(count):
+            xa_lon, xa_lat = float(xA[i, 0].item()), float(xA[i, 1].item())
+            xb_lon, xb_lat = float(xB[i, 0].item()), float(xB[i, 1].item())
+            ta = int(tA[i].item())
+            tb = int(tB[i].item())
+            log(
+                f"{i:3d} | ({xa_lon:.6f}, {xa_lat:.6f}) | "
+                f"({xb_lon:.6f}, {xb_lat:.6f}) | "
+                f"{ta:12d} | {tb:12d}"
+            )
+        log("")
 
     C = estimate_c(
         xA,
