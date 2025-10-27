@@ -10,7 +10,7 @@ from .registry import register_kernel
 from ..core.problem import Problem
 from ..core.state import SolverState
 
-_EARTH_RADIUS_KM = 6_371.0
+_EARTH_RADIUS_METERS = 6_371_000.0
 _MASK_SENTINEL_INT = 10**12
 
 
@@ -31,7 +31,7 @@ def _haversine_distance(xb_rad: torch.Tensor, xA_rad: torch.Tensor) -> torch.Ten
     a = sin_dlat.square() + cos_lat_b * cos_lat_a * sin_dlon.square()
     a = torch.clamp(a, min=0.0, max=1.0)
     c = 2.0 * torch.atan2(torch.sqrt(a), torch.sqrt(torch.clamp(1.0 - a, min=0.0)))
-    return (_EARTH_RADIUS_KM * c).to(xb_rad.dtype)
+    return (_EARTH_RADIUS_METERS * c).to(xb_rad.dtype)
 
 
 def _raw_haversine_slack(
