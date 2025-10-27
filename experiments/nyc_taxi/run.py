@@ -41,7 +41,7 @@ class ExperimentConfig:
     cmax: int | None = 5
     stopping_condition: int | None = 1000
     c_sample: int = 64
-    c_multiplier: float = 4.0
+    C: float | None = None
     out: str | None = None
     no_warmup: bool = False
 
@@ -145,14 +145,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="c_sample",
         type=int,
         default=None,
-        help="Sample size for estimating C",
+        help="Sample size for estimating C (used only if --C is not provided)",
     )
     parser.add_argument(
-        "--c-multiplier",
-        dest="c_multiplier",
+        "--C",
+        dest="C",
         type=float,
         default=None,
-        help="Multiplier applied to max sampled distance",
+        help="Provide scaling constant C directly (meters); skips estimation",
     )
     parser.add_argument("--out", type=str, default=None, help="Optional JSON output path")
     parser.add_argument(
@@ -215,13 +215,17 @@ def main() -> None:
 
     xA, xB, tA, tB = prepare_tensors(df, mapping, device=device)
 
-    C = estimate_c(
-        xA,
-        xB,
-        sample_size=config.c_sample,
-        seed=config.seed,
-        multiplier=config.c_multiplier,
-    )
+    if config.C is not None:
+        if config.C <= 0:
+            raise ValueError("C must be positive when provided")
+        C = float(config.C)
+    else:
+        C = estimate_c(
+            xA,
+            xB,
+            sample_size=config.c_sample,
+            seed=config.seed,
+        )
 
     # Warm-up run (amortize compilation/graph capture)
     warmup_time = 0.0
@@ -278,7 +282,6 @@ def main() -> None:
             "stopping_condition": config.stopping_condition,
             "C_estimate": C,
             "c_sample": config.c_sample,
-            "c_multiplier": config.c_multiplier,
         },
         "performance": {
             "warmup_runtime_sec": warmup_time,

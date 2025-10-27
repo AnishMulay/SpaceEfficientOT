@@ -47,7 +47,7 @@ class ExperimentConfig:
     delta: float = 0.01
     stopping_condition: int | None = 1000
     c_sample: int = 1
-    c_multiplier: float = 1.0
+    C: float | None = None
     speed_mps: float | None = 8.0
     y_max_meters: float | None = 100000.0
     future_only: bool = True
@@ -180,14 +180,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="c_sample",
         type=int,
         default=None,
-        help="Sample size for estimating C",
+        help="Sample size for estimating C (used only if --C is not provided)",
     )
     parser.add_argument(
-        "--c-multiplier",
-        dest="c_multiplier",
+        "--C",
+        dest="C",
         type=float,
         default=None,
-        help="Multiplier applied to max sampled distance",
+        help="Provide scaling constant C directly (meters); skips estimation",
     )
     parser.add_argument(
         "--speed-mps",
@@ -354,17 +354,22 @@ def main() -> None:
             )
         log("")
 
-    C = estimate_c(
-        xA,
-        xB,
-        sample_size=config.c_sample,
-        seed=config.seed,
-        multiplier=config.c_multiplier,
-    )
-    log(
-        "Estimated C value: "
-        f"C={C:.4f} (sample_size={config.c_sample}, multiplier={config.c_multiplier})"
-    )
+    if config.C is not None:
+        if config.C <= 0:
+            raise ValueError("C must be positive when provided")
+        C = float(config.C)
+        log(f"Using provided C value: C={C:.4f}")
+    else:
+        C = estimate_c(
+            xA,
+            xB,
+            sample_size=config.c_sample,
+            seed=config.seed,
+        )
+        log(
+            "Estimated C value: "
+            f"C={C:.4f} (sample_size={config.c_sample})"
+        )
 
     log(
         "Solver parameters: "
@@ -466,7 +471,6 @@ def main() -> None:
             "stopping_condition": config.stopping_condition,
             "C_estimate": C,
             "c_sample": config.c_sample,
-            "c_multiplier": config.c_multiplier,
             "speed_mps": config.speed_mps,
             "y_max_meters": config.y_max_meters,
             "future_only": bool(config.future_only),
