@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -72,15 +72,28 @@ def load_day(
     seed: int = 1,
     lat_range: tuple[float, float] = DEFAULT_LAT_RANGE,
     lon_range: tuple[float, float] = DEFAULT_LON_RANGE,
+    logger: Callable[[str], None] | None = None,
 ) -> tuple[pd.DataFrame, ColumnMapping]:
     """Load NYC taxi trips for a single day and return filtered data + column mapping."""
+
+    def _log(message: str) -> None:
+        if logger is not None:
+            logger(message)
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
 
+    _log(f"Loading NYC taxi data from {path}")
     df = _load_file(path)
+    _log(f"Loaded {len(df)} rows with columns: {list(df.columns)}")
     mapping = _resolve_columns(df)
+    _log(
+        "Resolved columns: "
+        f"pickup_time={mapping.pickup_time}, dropoff_time={mapping.dropoff_time}, "
+        f"pickup_lon={mapping.pickup_lon}, pickup_lat={mapping.pickup_lat}, "
+        f"dropoff_lon={mapping.dropoff_lon}, dropoff_lat={mapping.dropoff_lat}"
+    )
 
     df = df.copy()
     df[mapping.pickup_time] = pd.to_datetime(df[mapping.pickup_time])
@@ -90,6 +103,7 @@ def load_day(
     day_end = day_start + pd.Timedelta(days=1)
     mask = (df[mapping.pickup_time] >= day_start) & (df[mapping.pickup_time] < day_end)
     df = df.loc[mask].copy()
+    _log(f"Rows after filtering to date {date}: {len(df)}")
 
     if df.empty:
         raise ValueError(f"No trips found for date {date}")
@@ -102,6 +116,7 @@ def load_day(
     ]
 
     df = df.dropna(subset=coord_cols)
+    _log(f"Rows after dropping NA coordinates: {len(df)}")
 
     lat_min, lat_max = lat_range
     lon_min, lon_max = lon_range
@@ -114,6 +129,7 @@ def load_day(
     )
 
     df = df.loc[within_bounds].copy()
+    _log(f"Rows within coordinate bounds lat={lat_range}, lon={lon_range}: {len(df)}")
 
     if df.empty:
         raise ValueError("No trips remain after coordinate filtering")
@@ -122,9 +138,14 @@ def load_day(
     if n is not None and n > 0 and n < len(df):
         if random_sample:
             df = df.sample(n=n, random_state=seed)
+            _log(f"Randomly sampled {n} trips (seed={seed})")
         else:
             df = df.iloc[:n]
+            _log(f"Selected first {n} trips (sorted by pickup time)")
+    elif n is not None and n >= len(df):
+        _log(f"Requested n={n}, using all {len(df)} trips")
 
     df = df.sort_values(mapping.pickup_time).reset_index(drop=True)
+    _log(f"Final dataset size after sorting: {len(df)} trips")
 
     return df, mapping

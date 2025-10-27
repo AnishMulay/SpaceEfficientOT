@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -52,6 +52,8 @@ class ExperimentConfig:
     y_max_meters: float | None = 3000.0
     future_only: bool = True
     fill_policy: str = "none"
+    preview_count: int = 5
+    verbose: bool = False
     out: str | None = None
 
 
@@ -103,6 +105,7 @@ def _run_solver(
     y_max_meters: float | None,
     future_only: bool,
     fill_policy: str,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None,
 ) -> tuple[MatchResult, float]:
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -123,6 +126,7 @@ def _run_solver(
         y_max_meters=y_max_meters,
         future_only=future_only,
         fill_policy=fill_policy,
+        progress_callback=progress_callback,
     )
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -219,6 +223,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Final fill policy passed to the solver",
     )
+    parser.add_argument(
+        "--preview-count",
+        dest="preview_count",
+        type=int,
+        default=None,
+        help="Number of example trips to print before solving",
+    )
+    parser.add_argument(
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        default=None,
+        help="Enable detailed progress logging (per-iteration + tiles)",
+    )
     parser.add_argument("--out", type=str, default=None, help="Optional JSON output path")
     return parser
 
@@ -256,11 +274,23 @@ def main() -> None:
 
     config = _resolve_paths(_resolve_config(args))
 
+    def log(message: str) -> None:
+        print(message)
+
     device = (
         torch.device(config.device)
         if config.device is not None
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
+    log("=== NYC Taxi Haversine Speed Experiment ===")
+    log(f"Input file      : {config.input}")
+    log(f"Date            : {config.date}")
+    log(f"Requested trips : {config.n} ({'random' if config.random_sample else 'first'})")
+    log(f"Speed constraint: {config.speed_mps} m/s")
+    log(f"Y max clamp     : {config.y_max_meters} m")
+    log(f"Future-only     : {config.future_only}")
+    log(f"Fill policy     : {config.fill_policy}")
+    log(f"Device          : {device}")
 
     df, mapping = load_day(
         config.input,
@@ -268,9 +298,35 @@ def main() -> None:
         n=config.n,
         random_sample=bool(config.random_sample),
         seed=config.seed,
+        logger=log,
     )
+    log(f"Loader returned {len(df)} trips after filtering.")
+
+    preview_n = max(0, config.preview_count)
+    if preview_n > 0:
+        log(f"\nPreviewing first {min(preview_n, len(df))} trips (pickup -> dropoff):")
+        log("Idx | Pickup time           | Pickup (lon,lat)      | Dropoff (lon,lat)")
+        for idx in range(min(preview_n, len(df))):
+            pickup_time = df.iloc[idx][mapping.pickup_time]
+            pickup_lon = df.iloc[idx][mapping.pickup_lon]
+            pickup_lat = df.iloc[idx][mapping.pickup_lat]
+            dropoff_lon = df.iloc[idx][mapping.dropoff_lon]
+            dropoff_lat = df.iloc[idx][mapping.dropoff_lat]
+            log(
+                f"{idx:3d} | {pickup_time} | "
+                f"({pickup_lon:.6f}, {pickup_lat:.6f}) | "
+                f"({dropoff_lon:.6f}, {dropoff_lat:.6f})"
+            )
+        log("")
 
     xA, xB, tA, tB = prepare_tensors(df, mapping, device=device)
+    log(
+        "Prepared tensors: "
+        f"xA{tuple(xA.shape)}[{xA.dtype}], "
+        f"xB{tuple(xB.shape)}[{xB.dtype}], "
+        f"tA{tuple(tA.shape)}[{tA.dtype}], "
+        f"tB{tuple(tB.shape)}[{tB.dtype}] on device {device}"
+    )
 
     C = estimate_c(
         xA,
@@ -278,6 +334,15 @@ def main() -> None:
         sample_size=config.c_sample,
         seed=config.seed,
         multiplier=config.c_multiplier,
+    )
+    log(
+        "Estimated C value: "
+        f"C={C:.4f} (sample_size={config.c_sample}, multiplier={config.c_multiplier})"
+    )
+
+    log(
+        "Solver parameters: "
+        f"k={config.k}, delta={config.delta}, stopping_condition={config.stopping_condition}"
     )
 
     _, warmup_time = _run_solver(
@@ -295,7 +360,22 @@ def main() -> None:
         y_max_meters=config.y_max_meters,
         future_only=bool(config.future_only),
         fill_policy=config.fill_policy,
+        progress_callback=None,
     )
+    log(f"Warmup run completed in {warmup_time:.4f} s")
+
+    def progress_callback(event: str, payload: dict[str, Any]) -> None:
+        if event == "iteration":
+            log(
+                f"[Iter {payload['iteration']}] "
+                f"free_B={payload['free_b']} matched_B={payload['matched_b']} "
+                f"f={payload['objective_gap']:.3f} threshold={payload['threshold']:.3f}"
+            )
+        elif event == "tile":
+            log(
+                f"  Tile {payload['tile_index']} "
+                f"size={payload['tile_size']} rows[{payload['tile_start']}:{payload['tile_end']})"
+            )
 
     result, runtime = _run_solver(
         xA=xA,
@@ -312,7 +392,9 @@ def main() -> None:
         y_max_meters=config.y_max_meters,
         future_only=bool(config.future_only),
         fill_policy=config.fill_policy,
+        progress_callback=progress_callback if config.verbose else None,
     )
+    log(f"Measured run completed in {runtime:.4f} s over {int(result.iterations)} iterations")
 
     total_cost_m = float(result.matching_cost)
     total_cost_km = total_cost_m / 1000.0
@@ -324,6 +406,19 @@ def main() -> None:
 
     avg_cost_m = total_cost_m / feasible_matches if feasible_matches > 0 else None
     avg_cost_km = avg_cost_m / 1000.0 if avg_cost_m is not None else None
+    log("\n=== Match Summary ===")
+    log(f"Feasible matches : {feasible_matches}")
+    log(f"Free B nodes     : {free_B}")
+    log(f"Removed by future: {removed_by_future}")
+    log(f"Removed by speed : {removed_by_speed}")
+    log(f"Removed by y_max : {removed_by_ymax}")
+    log(f"Total cost (m)   : {total_cost_m:.4f}")
+    log(f"Total cost (km)  : {total_cost_km:.6f}")
+    if avg_cost_m is not None:
+        log(f"Average cost (m) : {avg_cost_m:.4f}")
+        log(f"Average cost (km): {avg_cost_km:.6f}")
+    else:
+        log("Average cost     : undefined (no feasible matches)")
 
     output = {
         "params": {
@@ -371,6 +466,9 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(output, f, indent=2)
+        log(f"\nWrote results to {out_path}")
+    else:
+        log("\nNo output path provided; results printed to stdout.")
 
 
 if __name__ == "__main__":

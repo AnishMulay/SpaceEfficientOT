@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple, Union
+from typing import Any, Callable, Tuple, Union
 
 import torch
 
@@ -50,6 +50,7 @@ def match(
     seed: int = 1,
     stopping_condition: int | None = None,
     fill_policy: str = "greedy",
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     **kernel_kwargs: Any,
 ) -> MatchResult:
     """
@@ -109,12 +110,36 @@ def match(
         if not bool(free_mask.any()):
             break
         ind_b_all_free = torch.nonzero(free_mask, as_tuple=False).squeeze(1)
+        if progress_callback is not None:
+            free_count = int(ind_b_all_free.numel())
+            matched = problem.m - free_count
+            progress_callback(
+                "iteration",
+                {
+                    "iteration": state.iteration,
+                    "free_b": free_count,
+                    "matched_b": matched,
+                    "objective_gap": f,
+                    "threshold": f_threshold,
+                },
+            )
 
         for start_idx in range(0, ind_b_all_free.numel(), k):
             end_idx = min(start_idx + k, ind_b_all_free.numel())
             idxB = ind_b_all_free[start_idx:end_idx]
             if idxB.numel() == 0:
                 continue
+            if progress_callback is not None:
+                progress_callback(
+                    "tile",
+                    {
+                        "iteration": state.iteration,
+                        "tile_index": start_idx // k,
+                        "tile_size": int(idxB.numel()),
+                        "tile_start": start_idx,
+                        "tile_end": end_idx,
+                    },
+                )
 
             # Pass the full preallocated buffer to enable constant-K execution
             slack_values = kernel_instance.compute_slack_tile(idxB, state, workspace, out=slack_tile)
