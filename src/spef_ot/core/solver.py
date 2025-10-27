@@ -49,11 +49,15 @@ def match(
     device: Union[str, torch.device, None] = None,
     seed: int = 1,
     stopping_condition: int | None = None,
+    fill_policy: str = "greedy",
     **kernel_kwargs: Any,
 ) -> MatchResult:
     """
     Solve the space-efficient matching problem between point sets `xA` and `xB`.
     """
+
+    if fill_policy not in ("greedy", "none"):
+        raise ValueError(f"fill_policy must be either 'greedy' or 'none', got {fill_policy!r}.")
 
     if device is None:
         device = xA.device if xA.device.type != "cpu" or xA.is_cuda else xB.device
@@ -167,19 +171,20 @@ def match(
 
             inner_loops += 1
 
-        state.iteration += 1
+    state.iteration += 1
 
     # Final fill for unmatched rows
     Ma = state.Ma
     Mb = state.Mb
 
-    ind_a = 0
-    for ind_b in range(problem.m):
-        if Mb[ind_b].item() == -1:
-            while Ma[ind_a].item() != -1:
-                ind_a += 1
-            Mb[ind_b] = ind_a
-            Ma[ind_a] = ind_b
+    if fill_policy == "greedy":
+        ind_a = 0
+        for ind_b in range(problem.m):
+            if Mb[ind_b].item() == -1:
+                while Ma[ind_a].item() != -1:
+                    ind_a += 1
+                Mb[ind_b] = ind_a
+                Ma[ind_a] = ind_b
 
     # Allow kernel to finish any clean-up (e.g. removing capped matches)
     finalize_metrics = kernel_instance.finalize(problem, state, workspace) or {}
