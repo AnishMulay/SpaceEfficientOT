@@ -268,7 +268,7 @@ class HaversineKernel(SlackKernel):
         if workspace.cmax_int >= 0:
             matched_mask = state.Mb != -1
             if matched_mask.any():
-                rows = torch.nonzero(matched_mask, as_tuple=False).view(-1)
+                rows = torch.nonzero(matched_mask, as_tuple=True)[0]
                 cols = state.Mb.index_select(0, rows)
                 xb = workspace.xB_deg.index_select(0, rows).to(dtype=torch.float64)
                 xa = workspace.xA_deg.index_select(0, cols).to(dtype=torch.float64)
@@ -279,7 +279,7 @@ class HaversineKernel(SlackKernel):
                 int_costs = torch.floor(dist * scale).to(torch.int64)
                 infeasible = int_costs >= workspace.cmax_int
                 if infeasible.any():
-                    bad_idx = torch.nonzero(infeasible, as_tuple=False).view(-1)
+                    bad_idx = torch.nonzero(infeasible, as_tuple=True)[0]
                     bad_rows = rows.index_select(0, bad_idx)
                     bad_cols = cols.index_select(0, bad_idx)
                     state.Mb[bad_rows] = -1
