@@ -402,11 +402,12 @@ def main() -> None:
                 f"free_B={payload['free_b']} matched_B={payload['matched_b']} "
                 f"f={payload['objective_gap']:.3f} threshold={payload['threshold']:.3f}"
             )
-        elif event == "tile":
-            log(
-                f"  Tile {payload['tile_index']} "
-                f"size={payload['tile_size']} rows[{payload['tile_start']}:{payload['tile_end']})"
-            )
+        # Temporarily disable tile-level logging
+        # elif event == "tile":
+        #     log(
+        #         f"  Tile {payload['tile_index']} "
+        #         f"size={payload['tile_size']} rows[{payload['tile_start']}:{payload['tile_end']})"
+        #     )
 
     result, runtime = _run_solver(
         xA=xA,

@@ -196,7 +196,8 @@ def match(
 
             inner_loops += 1
 
-    state.iteration += 1
+        # Completed one outer iteration of the solver
+        state.iteration += 1
 
     # Final fill for unmatched rows
     Ma = state.Ma
@@ -210,6 +211,28 @@ def match(
                     ind_a += 1
                 Mb[ind_b] = ind_a
                 Ma[ind_a] = ind_b
+
+    # Allow kernel to finish any clean-up (e.g. removing capped matches)
+    # Pre-finalize debug: report B size, matched count, and sample of yB duals
+    try:
+        total_b = int(problem.m)
+        Mb_cur = Mb
+        matched_mask = Mb_cur != -1
+        matched_count = int(matched_mask.sum().item())
+        print(f"[pre-finalize] B_total={total_b} matched_B={matched_count}")
+        if matched_count > 0:
+            idxs = torch.nonzero(matched_mask, as_tuple=False).squeeze(1)
+            sample_n = min(1000, int(idxs.numel()))
+            if sample_n > 0:
+                perm = torch.randperm(int(idxs.numel()), device=idxs.device, generator=generator)
+                sel = perm[:sample_n]
+                sample_b = idxs.index_select(0, sel)
+                sample_yB = state.yB.index_select(0, sample_b).detach().cpu().tolist()
+                sample_b_cpu = sample_b.detach().cpu().tolist()
+                print("[pre-finalize] sampled_B_indices:", sample_b_cpu)
+                print("[pre-finalize] sampled_yB_duals:", sample_yB)
+    except Exception:
+        pass
 
     # Allow kernel to finish any clean-up (e.g. removing capped matches)
     finalize_metrics = kernel_instance.finalize(problem, state, workspace) or {}
