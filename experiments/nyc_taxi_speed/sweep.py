@@ -78,8 +78,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=None, help="Seed to pass to run.py")
 
     # Execution controls
-    p.add_argument("--timeout-sec", type=int, default=600,
-                   help="Max seconds per run (default: 600 = 10 minutes)")
+    p.add_argument("--timeout-sec", type=int, default=1800,
+                   help="Max seconds per run (default: 1800 = 30 minutes)")
     p.add_argument("--no-warmup", dest="no_warmup", action="store_true", default=True,
                    help="Disable warm-up run in run.py (default: enabled)")
     p.add_argument("--preview-count", dest="preview_count", type=int, default=0,
@@ -95,8 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_grid() -> tuple[list[int], list[float]]:
-    # Defaults per request
-    n_list = [10000, 15000, 20000]
+    # Defaults per request, extended with larger N sets
+    n_list = [10000, 15000, 20000, 100000, 200000, 300000]
     speeds = [8.0, 10.0, 12.0]
     return n_list, speeds
 
@@ -256,9 +256,14 @@ def main() -> None:
     else:
         # Per-n defaults per request
         default_map = {
+            # Existing defaults
             10000: [1500, 1000],
             15000: [1500, 2000],
             20000: [2000, 2500],
+            # Additional requested combos
+            100000: [5000, 10000, 15000],
+            200000: [10000, 15000, 20000],
+            300000: [100000, 25000],
         }
         # Validate that all n have a mapping; if not, instruct user to pass --stopping
         missing = [n for n in n_list if int(n) not in default_map]
@@ -276,31 +281,14 @@ def main() -> None:
                 specs.append(RunSpec(n=int(n), speed_mps=float(v), stopping_condition=int(sc)))
 
     all_results: list[dict[str, Any]] = []
-    for spec in specs:
+    total = len(specs)
+    for idx, spec in enumerate(specs, start=1):
         result = _run_one(spec, args, out_dir)
         all_results.append(result)
-
-    summary = {
-        "grid": {
-            "n": n_list,
-            "speeds_mps": speeds,
-            "stopping_conditions_by_n": stopping_map,
-            "delta": args.delta,
-            "C": args.C,
-            "k": args.k,
-            "y_max_meters": args.y_max_meters,
-            "future_only": bool(args.future_only),
-            "fill_policy": args.fill_policy,
-            "timeout_sec": int(args.timeout_sec),
-            "no_warmup": bool(args.no_warmup),
-        },
-        "runs": all_results,
-    }
-
-    # Write combined JSON
-    summary_json = out_dir / "summary.json"
-    with summary_json.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+        status = result.get("status", "?")
+        print(
+            f"[{idx}/{total}] Completed: n={spec.n}, speed={spec.speed_mps}, stopping={spec.stopping_condition} -> {status}"
+        )
 
     # Write pretty Markdown
     summary_md = out_dir / "summary.md"
@@ -308,8 +296,8 @@ def main() -> None:
         f.write(_summarize_markdown(all_results))
 
     print(f"Wrote sweep outputs to: {out_dir}")
-    print(f" - Combined JSON : {summary_json}")
     print(f" - Pretty summary: {summary_md}")
+    print(f" - Per-run JSONs: {out_dir}/run_*.json")
 
 
 if __name__ == "__main__":
