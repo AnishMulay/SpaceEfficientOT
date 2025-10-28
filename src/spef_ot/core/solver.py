@@ -144,61 +144,6 @@ def match(
             # Pass the full preallocated buffer to enable constant-K execution
             slack_values = kernel_instance.compute_slack_tile(idxB, state, workspace, out=slack_tile)
 
-            # Per-tile, low-noise mask diagnostics for one sampled B row
-            try:
-                has_fields = all(
-                    hasattr(workspace, name)
-                    for name in ("EB", "EA_T", "radius_m", "times_A", "times_B")
-                )
-                if has_fields and idxB.numel() > 0:
-                    # Sample one local row index deterministically via RNG
-                    if idxB.numel() == 1:
-                        row_local = 0
-                    else:
-                        row_local = int(torch.randint(0, int(idxB.numel()), (1,), device=torch_device, generator=generator).item())
-                    b_idx_sample = int(idxB[row_local].item())
-
-                    # Build dt and per-pair distances for this single row
-                    tA = workspace.times_A.to(dtype=torch.int64)
-                    tB_val = int(workspace.times_B[b_idx_sample].item())
-                    dt_row = tB_val - tA  # [N], int64
-                    Ncols = int(tA.numel())
-
-                    # Distance for single row via 1x3 @ 3xN
-                    EB_row = workspace.EB.index_select(0, idxB[row_local:row_local+1]).to(dtype=torch.float32)  # [1,3]
-                    EA_T = workspace.EA_T.to(dtype=torch.float32)  # [3,N]
-                    cos = EB_row @ EA_T  # [1,N]
-                    cos = torch.clamp(cos, -1.0, 1.0)
-                    dist_row = (torch.acos(cos) * float(workspace.radius_m)).squeeze(0)  # [N]
-
-                    future_mask = dt_row < 0
-                    future_pruned = int(future_mask.sum().item())
-                    eligible = Ncols - future_pruned
-
-                    use_speed = bool(getattr(workspace, "use_speed", False))
-                    if use_speed and float(getattr(workspace, "speed_mps", 0.0)) > 0.0:
-                        inv_speed = float(getattr(workspace, "inv_speed", 0.0))
-                        time_needed = dist_row * inv_speed  # seconds
-                        speed_mask = dt_row.to(dtype=dist_row.dtype) < time_needed
-                        # Count speed-pruned only among dt >= 0
-                        speed_pruned = int((~future_mask & speed_mask).sum().item())
-                    else:
-                        speed_pruned = 0
-
-                    allowed = eligible - speed_pruned
-
-                    # Zero-slack count for this tile row
-                    zero_slack_row = int((slack_values[row_local] == 0).sum().item())
-
-                    print(
-                        f"[Iter {state.iteration}] [tile {start_idx // k}] b={b_idx_sample} "
-                        f"eligible={eligible}/{Ncols} future_pruned={future_pruned} "
-                        f"speed_pruned={speed_pruned} allowed={allowed} zero_slack_row={zero_slack_row}"
-                    )
-            except Exception:
-                # Never allow diagnostics to interfere
-                pass
-
             zero_rows, zero_cols = torch.where(slack_values == 0)
 
             ind_a_push = zero_rows.new_empty((0,), dtype=torch.int64)
@@ -220,6 +165,9 @@ def match(
                 ind_a_push, first_positions = _unique_with_first(candidate_cols, input_sorted=False)
                 ind_b_push_local = candidate_rows_local.index_select(0, first_positions)
 
+            # Track add/remove counts for per-tile log
+            add_count = 0
+            num_release = 0
             if ind_a_push.numel() > 0:
                 ind_b_push = idxB.index_select(0, ind_b_push_local)
 
@@ -236,7 +184,74 @@ def match(
                 state.Mb[ind_b_push] = ind_a_push
                 state.yA[ind_a_push] -= 1
 
-                f -= float(ind_a_push.numel() - num_release)
+                add_count = int(ind_a_push.numel())
+                f -= float(add_count - num_release)
+
+            # Per-tile, low-noise mask + matching impact diagnostics for one sampled B row
+            try:
+                has_fields = all(
+                    hasattr(workspace, name)
+                    for name in ("EB", "EA_T", "radius_m", "times_A", "times_B")
+                )
+                if has_fields and idxB.numel() > 0:
+                    tile_idx = start_idx // k
+                    # Sample one local row index deterministically via RNG
+                    if idxB.numel() == 1:
+                        row_local = 0
+                    else:
+                        row_local = int(
+                            torch.randint(0, int(idxB.numel()), (1,), device=torch_device, generator=generator).item()
+                        )
+                    b_idx_sample = int(idxB[row_local].item())
+
+                    # Build dt and per-pair distances for this single row
+                    tA = workspace.times_A.to(dtype=torch.int64)
+                    tB_val = int(workspace.times_B[b_idx_sample].item())
+                    dt_row = tB_val - tA  # [N], int64
+                    Ncols = int(tA.numel())
+
+                    # Distance for single row via 1x3 @ 3xN
+                    EB_row = workspace.EB.index_select(0, idxB[row_local : row_local + 1]).to(dtype=torch.float32)  # [1,3]
+                    EA_T = workspace.EA_T.to(dtype=torch.float32)  # [3,N]
+                    cos = EB_row @ EA_T  # [1,N]
+                    cos = torch.clamp(cos, -1.0, 1.0)
+                    dist_row = (torch.acos(cos) * float(workspace.radius_m)).squeeze(0)  # [N]
+
+                    future_mask = dt_row < 0
+                    future_pruned = int(future_mask.sum().item())
+                    eligible = Ncols - future_pruned
+
+                    use_speed = bool(getattr(workspace, "use_speed", False))
+                    if use_speed and float(getattr(workspace, "speed_mps", 0.0)) > 0.0:
+                        inv_speed = float(getattr(workspace, "inv_speed", 0.0))
+                        time_needed = dist_row * inv_speed  # seconds
+                        speed_mask = dt_row.to(dtype=dist_row.dtype) < time_needed
+                        # Count speed-pruned only among dt >= 0
+                        speed_pruned = int((~future_mask & speed_mask).sum().item())
+                    else:
+                        speed_pruned = 0
+
+                    allowed = eligible - speed_pruned
+
+                    # Zero-edge counts in tile and for sampled row
+                    zeros_tile = int((slack_values == 0).sum().item())
+                    if zeros_tile > 0:
+                        rows_with_zero = int(torch.unique(torch.nonzero(slack_values == 0, as_tuple=False)[:, 0]).numel())
+                    else:
+                        rows_with_zero = 0
+                    zero_row = int((slack_values[row_local] == 0).sum().item())
+
+                    free_b_now = int((state.Mb == -1).sum().item())
+                    net = add_count - num_release
+
+                    print(
+                        f"[Iter {state.iteration}:free_B={free_b_now}] [tile {tile_idx}] b={b_idx_sample} "
+                        f"eligible={eligible}/{Ncols} future={future_pruned} speed={speed_pruned} allowed={allowed} "
+                        f"zeros_tile={zeros_tile} rows_with_zero={rows_with_zero} add={add_count} remove={num_release} net={net:+d} zero_row={zero_row}"
+                    )
+            except Exception:
+                # Never allow diagnostics to interfere
+                pass
 
             min_slack = torch.min(slack_values, dim=1).values
             non_zero_mask = min_slack != 0
