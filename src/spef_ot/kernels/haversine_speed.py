@@ -354,8 +354,12 @@ class HaversineSpeedKernel(SlackKernel):
         near_epsilon_sec: float = 1.0,
     ) -> Optional[dict[str, Any]]:
         try:
+            print("[haversine_speed.diag] begin")
             # Only meaningful if speed constraint is active
             if not workspace.use_speed or workspace.speed_mps <= 0.0:
+                print(
+                    f"[haversine_speed.diag] disabled: use_speed={workspace.use_speed} speed_mps={workspace.speed_mps}"
+                )
                 return None
 
             device = problem.device
@@ -363,10 +367,12 @@ class HaversineSpeedKernel(SlackKernel):
 
             free_mask = state.Mb == -1
             if not bool(free_mask.any()):
+                print("[haversine_speed.diag] no free rows; skip")
                 return None
             free_idx = torch.nonzero(free_mask, as_tuple=False).squeeze(1)
             S = min(int(sentinel_count), int(free_idx.numel()))
             if S <= 0:
+                print("[haversine_speed.diag] free set empty after sampling; skip")
                 return None
 
             if S == int(free_idx.numel()):
@@ -374,6 +380,7 @@ class HaversineSpeedKernel(SlackKernel):
             else:
                 perm = torch.randperm(int(free_idx.numel()), device=device, generator=generator)
                 samp = free_idx.index_select(0, perm[:S])
+            print(f"[haversine_speed.diag] sampled S={S} (free={int(free_idx.numel())})")
 
             # Distances vs all A in fp32 and fp64 via dot+acos
             EB_rows_f32 = workspace.EB.index_select(0, samp).to(dtype=torch.float32)
@@ -542,15 +549,18 @@ class HaversineSpeedKernel(SlackKernel):
                 }
                 sentinels.append(row_payload)
 
-            return {
+            payload = {
                 "iteration": state.iteration,
                 "sentinel_count": S,
                 "speed_mps": float(workspace.speed_mps),
                 "A_count": N,
                 "sentinels": sentinels,
             }
+            print("[haversine_speed.diag] done; returning payload")
+            return payload
         except Exception:
             # Diagnostics must never interfere with solving
+            print("[haversine_speed.diag] exception; returning None")
             return None
 
 

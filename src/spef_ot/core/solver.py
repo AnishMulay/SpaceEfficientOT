@@ -199,13 +199,34 @@ def match(
         # Sentinel-B deep dive: delegate to kernel if available; otherwise skip
         if progress_callback is not None:
             try:
-                if hasattr(kernel_instance, "iteration_diagnostics"):
+                kernel_has_diag = hasattr(kernel_instance, "iteration_diagnostics")
+                # Lightweight visibility for debugging sentinel path
+                try:
+                    use_speed_dbg = bool(getattr(workspace, "use_speed", False))
+                    speed_dbg = float(getattr(workspace, "speed_mps", 0.0))
+                    free_dbg = int((state.Mb == -1).sum().item())
+                except Exception:
+                    use_speed_dbg = False
+                    speed_dbg = -1.0
+                    free_dbg = -1
+                if not kernel_has_diag:
+                    print(f"[sentinel-debug] kernel has no iteration_diagnostics; skip (free_B={free_dbg})")
+                else:
+                    print(
+                        f"[sentinel-debug] calling kernel.iteration_diagnostics(use_speed={use_speed_dbg}, speed_mps={speed_dbg}, free_B={free_dbg})"
+                    )
                     payload = kernel_instance.iteration_diagnostics(problem, state, workspace)
                     if payload:
+                        print("[sentinel-debug] diagnostics returned payload; emitting event")
                         progress_callback("sentinel", payload)
-            except Exception:
-                # Never allow diagnostics to break the solver
-                pass
+                    else:
+                        print("[sentinel-debug] diagnostics returned None; no event emitted")
+            except Exception as e:
+                # Never allow diagnostics to break the solver, but surface the reason once per iteration
+                try:
+                    print(f"[sentinel-debug] diagnostics raised {type(e).__name__}: {e}")
+                except Exception:
+                    pass
 
         # Completed one outer iteration of the solver
         state.iteration += 1
