@@ -186,47 +186,31 @@ def match(
             min_slack = torch.min(slack_values, dim=1).values
             non_zero_mask = min_slack != 0
             if non_zero_mask.any():
-                ind_b_not_pushed = idxB.index_select(
-                    0, torch.nonzero(non_zero_mask, as_tuple=False).squeeze(1)
-                )
-                delta_yB = min_slack.index_select(
-                    0, torch.nonzero(non_zero_mask, as_tuple=False).squeeze(1)
-                )
+                nz_rows = torch.nonzero(non_zero_mask, as_tuple=False).squeeze(1)
+                ind_b_not_pushed = idxB.index_select(0, nz_rows)
+                delta_yB = min_slack.index_select(0, nz_rows)
+                try:
+                    # Per-tile delta yB logging (before dual update)
+                    print(
+                        f"[Iter {state.iteration}]  [tile {start_idx // k}] ΔyB count={int(ind_b_not_pushed.numel())} "
+                        f"b_idx={ind_b_not_pushed.detach().cpu().tolist()} "
+                        f"min_slack={delta_yB.detach().cpu().tolist()}"
+                    )
+                except Exception:
+                    pass
                 state.yB.index_add_(0, ind_b_not_pushed, delta_yB)
 
             inner_loops += 1
 
-        # Sentinel-B deep dive: delegate to kernel if available; otherwise skip
-        if progress_callback is not None:
-            try:
-                kernel_has_diag = hasattr(kernel_instance, "iteration_diagnostics")
-                # Lightweight visibility for debugging sentinel path
-                try:
-                    use_speed_dbg = bool(getattr(workspace, "use_speed", False))
-                    speed_dbg = float(getattr(workspace, "speed_mps", 0.0))
-                    free_dbg = int((state.Mb == -1).sum().item())
-                except Exception:
-                    use_speed_dbg = False
-                    speed_dbg = -1.0
-                    free_dbg = -1
-                if not kernel_has_diag:
-                    print(f"[sentinel-debug] kernel has no iteration_diagnostics; skip (free_B={free_dbg})")
-                else:
-                    print(
-                        f"[sentinel-debug] calling kernel.iteration_diagnostics(use_speed={use_speed_dbg}, speed_mps={speed_dbg}, free_B={free_dbg})"
-                    )
-                    payload = kernel_instance.iteration_diagnostics(problem, state, workspace)
-                    if payload:
-                        print("[sentinel-debug] diagnostics returned payload; emitting event")
-                        progress_callback("sentinel", payload)
-                    else:
-                        print("[sentinel-debug] diagnostics returned None; no event emitted")
-            except Exception as e:
-                # Never allow diagnostics to break the solver, but surface the reason once per iteration
-                try:
-                    print(f"[sentinel-debug] diagnostics raised {type(e).__name__}: {e}")
-                except Exception:
-                    pass
+        # Sentinel diagnostics temporarily disabled for focused ΔyB logging
+        # if progress_callback is not None:
+        #     try:
+        #         if hasattr(kernel_instance, "iteration_diagnostics"):
+        #             payload = kernel_instance.iteration_diagnostics(problem, state, workspace)
+        #             if payload:
+        #                 progress_callback("sentinel", payload)
+        #     except Exception:
+        #         pass
 
         # Completed one outer iteration of the solver
         state.iteration += 1
