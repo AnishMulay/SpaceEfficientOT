@@ -354,12 +354,8 @@ class HaversineSpeedKernel(SlackKernel):
         near_epsilon_sec: float = 1.0,
     ) -> Optional[dict[str, Any]]:
         try:
-            print("[haversine_speed.diag] begin")
             # Only meaningful if speed constraint is active
             if not workspace.use_speed or workspace.speed_mps <= 0.0:
-                print(
-                    f"[haversine_speed.diag] disabled: use_speed={workspace.use_speed} speed_mps={workspace.speed_mps}"
-                )
                 return None
 
             device = problem.device
@@ -367,12 +363,10 @@ class HaversineSpeedKernel(SlackKernel):
 
             free_mask = state.Mb == -1
             if not bool(free_mask.any()):
-                print("[haversine_speed.diag] no free rows; skip")
                 return None
             free_idx = torch.nonzero(free_mask, as_tuple=False).squeeze(1)
             S = min(int(sentinel_count), int(free_idx.numel()))
             if S <= 0:
-                print("[haversine_speed.diag] free set empty after sampling; skip")
                 return None
 
             if S == int(free_idx.numel()):
@@ -380,39 +374,25 @@ class HaversineSpeedKernel(SlackKernel):
             else:
                 perm = torch.randperm(int(free_idx.numel()), device=device, generator=generator)
                 samp = free_idx.index_select(0, perm[:S])
-            print(f"[haversine_speed.diag] sampled S={S} (free={int(free_idx.numel())})")
 
             # Distances vs all A in fp32 and fp64 via dot+acos
             EB_rows_f32 = workspace.EB.index_select(0, samp).to(dtype=torch.float32)
             EA_T_f32 = workspace.EA_T.to(dtype=torch.float32)
-            print(
-                f"[haversine_speed.diag] matmul32 shapes EB_rows={tuple(EB_rows_f32.shape)} EA_T={tuple(EA_T_f32.shape)} device={EB_rows_f32.device}"
-            )
             cos32 = EB_rows_f32 @ EA_T_f32
             cos32 = torch.clamp(cos32, -1.0, 1.0)
             dist32 = torch.acos(cos32) * float(workspace.radius_m)  # [S, N]
-            print(
-                f"[haversine_speed.diag] dist32 computed shape={tuple(dist32.shape)} dtype={dist32.dtype} device={dist32.device}"
-            )
 
             EB_rows_f64 = EB_rows_f32.to(dtype=torch.float64)
             EA_T_f64 = EA_T_f32.to(dtype=torch.float64)
-            print(
-                f"[haversine_speed.diag] matmul64 shapes EB_rows={tuple(EB_rows_f64.shape)} EA_T={tuple(EA_T_f64.shape)} device={EB_rows_f64.device}"
-            )
             cos64 = EB_rows_f64 @ EA_T_f64
             cos64 = torch.clamp(cos64, -1.0, 1.0)
             dist64 = torch.acos(cos64) * float(workspace.radius_m)  # [S, N]
-            print(
-                f"[haversine_speed.diag] dist64 computed shape={tuple(dist64.shape)} dtype={dist64.dtype} device={dist64.device}"
-            )
 
             tA = workspace.times_A.to(dtype=torch.int64)
             tB_sel = workspace.times_B.index_select(0, samp).to(dtype=torch.int64)
             speed = float(workspace.speed_mps)
             N = int(tA.numel())
             eps = float(near_epsilon_sec)
-            print(f"[haversine_speed.diag] N={N} speed={speed} eps={eps}")
 
             sentinels: list[dict[str, Any]] = []
 
@@ -437,28 +417,7 @@ class HaversineSpeedKernel(SlackKernel):
                 kernel_allowed = int(valid_k32.sum().item())
                 oracle_valid = int(valid_o64.sum().item())
 
-                if eligible > 0:
-                    margin32 = dt[dt_nonneg].to(dtype=torch.float32) - need32[dt_nonneg]
-                    margin64 = dt[dt_nonneg].to(dtype=torch.float64) - need64[dt_nonneg]
-                    def _q(vals: torch.Tensor, probs: list[float]) -> list[float]:
-                        # Robust quantiles: try device first, then CPU fallback
-                        try:
-                            q = torch.quantile(vals, torch.tensor(probs, device=vals.device))
-                            return [float(v.item()) for v in q]
-                        except Exception:
-                            q = torch.quantile(vals.detach().cpu(), torch.tensor(probs))
-                            return [float(v.item()) for v in q]
-                    probs = [0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0]
-                    q32 = _q(margin32, probs)
-                    q64 = _q(margin64, probs)
-                    try:
-                        near = int((margin64.abs() <= eps).sum().item())
-                    except Exception:
-                        near = 0
-                else:
-                    q32 = q64 = []
-                    near = 0
-
+                # Mismatches and near-boundary stats (no quantiles)
                 miss_K_mask = valid_o64 & (~valid_k32)
                 miss_O_mask = (~valid_o64) & valid_k32
                 miss_K = int(miss_K_mask.sum().item())
@@ -501,7 +460,6 @@ class HaversineSpeedKernel(SlackKernel):
                         )
 
                 # Zero-slack and top-5 smallest slacks for this row
-                print(f"[haversine_speed.diag] computing slack_row for b_idx={b_idx}")
                 slack_row = self.compute_slack_tile(samp[row : row + 1], state, workspace)  # [1, N]
                 slack_row = slack_row[0]
                 zero_count = int((slack_row == 0).sum().item())
@@ -543,33 +501,9 @@ class HaversineSpeedKernel(SlackKernel):
                     "miss_kernel": miss_K,
                     "miss_kernel_near": int((miss_K_mask & near_mask64).sum().item()),
                     "false_positive": miss_O,
-                    "margin64_quantiles": (
-                        {
-                            "min": q64[0],
-                            "p01": q64[1],
-                            "p10": q64[2],
-                            "p50": q64[3],
-                            "p90": q64[4],
-                            "p99": q64[5],
-                            "max": q64[6],
-                        }
-                        if q64
-                        else None
-                    ),
-                    "margin32_quantiles": (
-                        {
-                            "min": q32[0],
-                            "p01": q32[1],
-                            "p10": q32[2],
-                            "p50": q32[3],
-                            "p90": q32[4],
-                            "p99": q32[5],
-                            "max": q32[6],
-                        }
-                        if q32
-                        else None
-                    ),
-                    "near_boundary_count": near,
+                    # Quantiles intentionally omitted to avoid overhead/instability
+                    "margin64_quantiles": None,
+                    "margin32_quantiles": None,
                     "zero_slack_count": zero_count,
                     "top_slack": top_list,
                     "miss_kernel_examples": ex_K,
@@ -577,24 +511,14 @@ class HaversineSpeedKernel(SlackKernel):
                 }
                 sentinels.append(row_payload)
 
-            payload = {
+            return {
                 "iteration": state.iteration,
                 "sentinel_count": S,
                 "speed_mps": float(workspace.speed_mps),
                 "A_count": N,
                 "sentinels": sentinels,
             }
-            print("[haversine_speed.diag] done; returning payload")
-            return payload
-        except Exception as e:
-            # Diagnostics must never interfere with solving
-            import traceback as _tb
-            try:
-                print(f"[haversine_speed.diag] exception: {type(e).__name__}: {e}")
-                print("[haversine_speed.diag] traceback:\n" + _tb.format_exc())
-            except Exception:
-                pass
-            print("[haversine_speed.diag] exception; returning None")
+        except Exception:
             return None
 
 
