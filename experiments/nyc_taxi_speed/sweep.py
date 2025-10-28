@@ -45,14 +45,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Sweep NYC taxi Haversine Speed experiment across n, speed, with per-n stopping conditions",
         epilog=(
             "Example: python experiments/nyc_taxi_speed/sweep.py "
-            "--n 10000,15000,20000 --speeds 8,10,12 --delta 0.001 --C 100000 "
-            "--timeout-sec 600"
+            "--n 100000,200000,300000 --speeds 8,10,12 --delta 0.001 --C 100000 "
+            "--timeout-sec 1800"
         ),
     )
 
     # Parameter grids
     p.add_argument("--n", dest="n_list", type=_parse_int_list, default=None,
-                   help="Comma-separated list of n values (e.g., 10000,15000,20000)")
+                   help="Comma-separated list of n values (e.g., 100000,200000,300000)")
     p.add_argument("--speeds", dest="speeds", type=_parse_float_list, default=None,
                    help="Comma-separated list of speeds in m/s (e.g., 8,10,12)")
     p.add_argument("--stopping", dest="stopping", type=_parse_int_list, default=None,
@@ -95,8 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_grid() -> tuple[list[int], list[float]]:
-    # Defaults per request, extended with larger N sets
-    n_list = [10000, 15000, 20000, 100000, 200000, 300000]
+    # Defaults per request: large-N only
+    n_list = [100000, 200000, 300000]
     speeds = [8.0, 10.0, 12.0]
     return n_list, speeds
 
@@ -256,11 +256,7 @@ def main() -> None:
     else:
         # Per-n defaults per request
         default_map = {
-            # Existing defaults
-            10000: [1500, 1000],
-            15000: [1500, 2000],
-            20000: [2000, 2500],
-            # Additional requested combos
+            # Large-N defaults per request
             100000: [5000, 10000, 15000],
             200000: [10000, 15000, 20000],
             300000: [100000, 25000],
