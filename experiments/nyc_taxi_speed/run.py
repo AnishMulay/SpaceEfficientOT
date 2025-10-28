@@ -39,15 +39,15 @@ from prepare import prepare_tensors  # noqa: E402
 class ExperimentConfig:
     input: str = "./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv"
     date: str = "2014-10-14"
-    n: int | None = 10000
+    n: int | None = 100000
     random_sample: bool = True
     seed: int = 1
     device: str | None = "cuda"
     k: int = 512
-    delta: float = 0.01
+    delta: float = 0.001
     stopping_condition: int | None = 1000
     c_sample: int = 1
-    C: float | None = None
+    C: float | None = 100000.0
     speed_mps: float | None = 8.0
     y_max_meters: float | None = 100000.0
     future_only: bool = True
