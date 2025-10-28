@@ -196,6 +196,224 @@ def match(
 
             inner_loops += 1
 
+        # Sentinel-B deep dive: sample a few free B rows and report feasibility
+        if progress_callback is not None:
+            try:
+                # Only run when kernel workspace exposes necessary fields (e.g., HaversineSpeed)
+                has_fields = all(
+                    hasattr(workspace, name)
+                    for name in (
+                        "EB",
+                        "EA_T",
+                        "radius_m",
+                        "times_A",
+                        "times_B",
+                    )
+                )
+                use_speed = bool(getattr(workspace, "use_speed", False))
+                speed_mps = float(getattr(workspace, "speed_mps", 0.0))
+                if has_fields and use_speed and speed_mps > 0.0:
+                    import datetime as _dt
+
+                    # Recompute current free set after tile updates
+                    free_mask_cur = state.Mb == -1
+                    free_idx = torch.nonzero(free_mask_cur, as_tuple=False).squeeze(1)
+                    S = min(6, int(free_idx.numel()))
+                    sentinels: list[dict[str, Any]] = []
+                    if S > 0:
+                        # Sample without replacement using solver RNG
+                        if S == int(free_idx.numel()):
+                            samp = free_idx
+                        else:
+                            perm = torch.randperm(int(free_idx.numel()), device=torch_device, generator=generator)
+                            samp = free_idx.index_select(0, perm[:S])
+
+                        # Build batch EB rows and compute distances against all A in fp32 and fp64
+                        EB_rows_f32 = workspace.EB.index_select(0, samp).to(dtype=torch.float32)
+                        EA_T_f32 = workspace.EA_T.to(dtype=torch.float32)
+                        cos32 = EB_rows_f32 @ EA_T_f32  # [S, N]
+                        cos32 = torch.clamp(cos32, -1.0, 1.0)
+                        dist32 = torch.acos(cos32) * float(workspace.radius_m)
+
+                        EB_rows_f64 = EB_rows_f32.to(dtype=torch.float64)
+                        EA_T_f64 = EA_T_f32.to(dtype=torch.float64)
+                        cos64 = EB_rows_f64 @ EA_T_f64
+                        cos64 = torch.clamp(cos64, -1.0, 1.0)
+                        dist64 = torch.acos(cos64) * float(workspace.radius_m)
+
+                        tA = workspace.times_A.to(dtype=torch.int64)
+                        tB_sel = workspace.times_B.index_select(0, samp).to(dtype=torch.int64)
+
+                        N = int(tA.numel())
+                        eps = 1.0  # seconds for near-boundary
+
+                        # For each sentinel b, compute per-row stats
+                        for row in range(S):
+                            b_idx = int(samp[row].item())
+                            tB_val = int(tB_sel[row].item())
+                            # Broadcast dt over columns
+                            dt = (tB_sel[row].view(1, 1) - tA.view(1, -1)).squeeze(0)  # [N], int64
+                            dt_nonneg = dt >= 0
+
+                            dist32_row = dist32[row, :]
+                            dist64_row = dist64[row, :]
+
+                            # Kernel allowed (float32 distance)
+                            need32 = (dist32_row / speed_mps).to(dtype=torch.float32)
+                            valid_k32 = dt_nonneg & (dt.to(dtype=need32.dtype) >= need32)
+
+                            # Oracle valid (float64 distance)
+                            need64 = (dist64_row / speed_mps).to(dtype=torch.float64)
+                            valid_o64 = dt_nonneg & (dt.to(dtype=need64.dtype) >= need64)
+
+                            eligible = int(dt_nonneg.sum().item())
+                            future_invalid = N - eligible
+
+                            kernel_allowed = int(valid_k32.sum().item())
+                            oracle_valid = int(valid_o64.sum().item())
+
+                            # Margins on eligible set only
+                            if eligible > 0:
+                                margin32 = dt[dt_nonneg].to(dtype=torch.float32) - need32[dt_nonneg]
+                                margin64 = dt[dt_nonneg].to(dtype=torch.float64) - need64[dt_nonneg]
+                                # Quantiles
+                                def _q(vals: torch.Tensor, probs: list[float]) -> list[float]:
+                                    q = torch.quantile(vals, torch.tensor(probs, device=vals.device))
+                                    return [float(v.item()) for v in q]
+
+                                q_probs = [0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0]
+                                q32 = _q(margin32, q_probs)
+                                q64 = _q(margin64, q_probs)
+                                near = int((margin64.abs() <= eps).sum().item())
+                            else:
+                                q32 = q64 = []
+                                near = 0
+
+                            # Mismatches
+                            miss_K_mask = valid_o64 & (~valid_k32)
+                            miss_O_mask = (~valid_o64) & valid_k32
+                            miss_K = int(miss_K_mask.sum().item())
+                            miss_O = int(miss_O_mask.sum().item())
+
+                            # Examples (cap to 5)
+                            ex_K = []
+                            if miss_K > 0:
+                                idxs = torch.nonzero(miss_K_mask, as_tuple=False).squeeze(1)[:5]
+                                for a_idx_t in idxs:
+                                    a_i = int(a_idx_t.item())
+                                    ex_K.append(
+                                        {
+                                            "a_idx": a_i,
+                                            "dt_s": int(dt[a_i].item()),
+                                            "dist32_m": float(dist32_row[a_i].item()),
+                                            "dist64_m": float(dist64_row[a_i].item()),
+                                            "need_time_s": float((dist64_row[a_i] / speed_mps).item()),
+                                            "margin32_s": float((dt[a_i].to(dtype=torch.float32) - need32[a_i]).item()),
+                                            "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                                        }
+                                    )
+
+                            ex_O = []
+                            if miss_O > 0:
+                                idxs = torch.nonzero(miss_O_mask, as_tuple=False).squeeze(1)[:5]
+                                for a_idx_t in idxs:
+                                    a_i = int(a_idx_t.item())
+                                    ex_O.append(
+                                        {
+                                            "a_idx": a_i,
+                                            "dt_s": int(dt[a_i].item()),
+                                            "dist32_m": float(dist32_row[a_i].item()),
+                                            "dist64_m": float(dist64_row[a_i].item()),
+                                            "need_time_s": float((dist64_row[a_i] / speed_mps).item()),
+                                            "margin32_s": float((dt[a_i].to(dtype=torch.float32) - need32[a_i]).item()),
+                                            "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                                        }
+                                    )
+
+                            # Compute zero-slack count and smallest slacks for this sentinel row
+                            slack_row = kernel_instance.compute_slack_tile(samp[row : row + 1], state, workspace)  # [1, N]
+                            slack_row = slack_row[0]
+                            zero_count = int((slack_row == 0).sum().item())
+                            # Top-5 smallest slacks
+                            k_top = min(5, N)
+                            top_vals, top_idx = torch.topk(slack_row, k_top, largest=False)
+                            top_list = []
+                            for j in range(k_top):
+                                a_i = int(top_idx[j].item())
+                                top_list.append(
+                                    {
+                                        "a_idx": a_i,
+                                        "slack": int(top_vals[j].item()),
+                                        "dt_s": int(dt[a_i].item()),
+                                        "dist_km": float((dist64_row[a_i] / 1000.0).item()),
+                                        "need_time_s": float((dist64_row[a_i] / speed_mps).item()),
+                                        "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                                    }
+                                )
+
+                            tB_iso = _dt.datetime.utcfromtimestamp(tB_val).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            # Near-boundary count restricted to misses (use 64-bit margin)
+                            near_mask64 = (dt.to(dtype=torch.float64) - need64).abs() <= eps
+                            row_payload = {
+                                "b_idx": b_idx,
+                                "tB_epoch": tB_val,
+                                "tB_iso": tB_iso,
+                                "N": N,
+                                "eligible_by_time": eligible,
+                                "future_invalid": future_invalid,
+                                "oracle_valid": oracle_valid,
+                                "kernel_allowed": kernel_allowed,
+                                "miss_kernel": miss_K,
+                                "miss_kernel_near": int((miss_K_mask & near_mask64).sum().item()),
+                                "false_positive": miss_O,
+                                "margin64_quantiles": (
+                                    {
+                                        "min": q64[0],
+                                        "p01": q64[1],
+                                        "p10": q64[2],
+                                        "p50": q64[3],
+                                        "p90": q64[4],
+                                        "p99": q64[5],
+                                        "max": q64[6],
+                                    }
+                                    if q64
+                                    else None
+                                ),
+                                "margin32_quantiles": (
+                                    {
+                                        "min": q32[0],
+                                        "p01": q32[1],
+                                        "p10": q32[2],
+                                        "p50": q32[3],
+                                        "p90": q32[4],
+                                        "p99": q32[5],
+                                        "max": q32[6],
+                                    }
+                                    if q32
+                                    else None
+                                ),
+                                "near_boundary_count": near,
+                                "zero_slack_count": zero_count,
+                                "top_slack": top_list,
+                                "miss_kernel_examples": ex_K,
+                                "false_positive_examples": ex_O,
+                            }
+                            sentinels.append(row_payload)
+
+                        progress_callback(
+                            "sentinel",
+                            {
+                                "iteration": state.iteration,
+                                "sentinel_count": S,
+                                "speed_mps": speed_mps,
+                                "A_count": N,
+                                "sentinels": sentinels,
+                            },
+                        )
+            except Exception:
+                # Never allow diagnostics to break the solver
+                pass
+
         # Completed one outer iteration of the solver
         state.iteration += 1
 

@@ -407,6 +407,87 @@ def main() -> None:
                 f"free_B={payload['free_b']} matched_B={payload['matched_b']} "
                 f"f={payload['objective_gap']:.3f} threshold={payload['threshold']:.3f}"
             )
+        elif event == "sentinel":
+            try:
+                it = int(payload.get("iteration", -1))
+                S = int(payload.get("sentinel_count", 0))
+                speed = float(payload.get("speed_mps", 0.0))
+                N = int(payload.get("A_count", 0))
+                log("")
+                log(
+                    f"Iter {it} — Sentinel Deep Dive (S={S}, speed={speed:.2f} m/s, A_count={N})"
+                )
+                sentinels = payload.get("sentinels", [])
+                for s in sentinels:
+                    b_idx = s.get("b_idx")
+                    tB_iso = s.get("tB_iso")
+                    tB_epoch = s.get("tB_epoch")
+                    eligible = s.get("eligible_by_time")
+                    future_invalid = s.get("future_invalid")
+                    oracle_valid = s.get("oracle_valid")
+                    kernel_allowed = s.get("kernel_allowed")
+                    miss_K = s.get("miss_kernel")
+                    miss_K_near = s.get("miss_kernel_near")
+                    miss_O = s.get("false_positive")
+                    q64 = s.get("margin64_quantiles")
+                    q32 = s.get("margin32_quantiles")
+                    zero_count = s.get("zero_slack_count")
+                    top_slack = s.get("top_slack", [])
+                    exK = s.get("miss_kernel_examples", [])
+                    exO = s.get("false_positive_examples", [])
+
+                    log(
+                        f"Pickup b={b_idx} tB={tB_iso} (epoch={tB_epoch})"
+                    )
+                    log(
+                        f"  Eligible drop-offs (tA ≤ tB): {eligible}/{N}  [future-invalid: {future_invalid}]"
+                    )
+                    log("  Feasibility by speed")
+                    log(f"    - Oracle valid (float64): {oracle_valid}")
+                    log(f"    - Kernel allowed (float32): {kernel_allowed}")
+                    log(
+                        f"    - Kernel missed valid (FN): {miss_K}  [near-boundary (±1.0s): {miss_K_near}]"
+                    )
+                    log(f"    - Kernel false positives (FP): {miss_O}")
+                    log("  Speed margin (sec) = dt − dist/speed")
+                    if q64 is not None:
+                        log(
+                            "    - Oracle64: "
+                            f"min={q64['min']:.3f} p01={q64['p01']:.3f} p10={q64['p10']:.3f} "
+                            f"p50={q64['p50']:.3f} p90={q64['p90']:.3f} p99={q64['p99']:.3f} max={q64['max']:.3f}"
+                        )
+                    if q32 is not None:
+                        log(
+                            "    - Kernel32: "
+                            f"min={q32['min']:.3f} p01={q32['p01']:.3f} p10={q32['p10']:.3f} "
+                            f"p50={q32['p50']:.3f} p90={q32['p90']:.3f} p99={q32['p99']:.3f} max={q32['max']:.3f}"
+                        )
+                    log(f"  Zero-slack edges (current duals): {zero_count}")
+                    if top_slack:
+                        log("  Smallest slack (top 5)")
+                        for item in top_slack:
+                            log(
+                                f"    - a={item['a_idx']} slack={item['slack']} dt={item['dt_s']}s "
+                                f"dist={item['dist_km']:.3f} km need_time={item['need_time_s']:.3f}s "
+                                f"margin64={item['margin64_s']:.3f}s"
+                            )
+                    if exK:
+                        log("  Mismatch examples — Kernel missed valid (FN)")
+                        for e in exK:
+                            log(
+                                f"    • a={e['a_idx']} dt={e['dt_s']}s dist32={e['dist32_m']:.2f}m dist64={e['dist64_m']:.2f}m "
+                                f"need={e['need_time_s']:.3f}s margin32={e['margin32_s']:.3f}s margin64={e['margin64_s']:.3f}s"
+                            )
+                    if exO:
+                        log("  Mismatch examples — Kernel allowed invalid (FP)")
+                        for e in exO:
+                            log(
+                                f"    • a={e['a_idx']} dt={e['dt_s']}s dist32={e['dist32_m']:.2f}m dist64={e['dist64_m']:.2f}m "
+                                f"need={e['need_time_s']:.3f}s margin32={e['margin32_s']:.3f}s margin64={e['margin64_s']:.3f}s"
+                            )
+            except Exception:
+                # Logging must not break the run
+                pass
         # Temporarily disable tile-level logging
         # elif event == "tile":
         #     log(
