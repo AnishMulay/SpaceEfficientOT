@@ -343,5 +343,215 @@ class HaversineSpeedKernel(SlackKernel):
             "removed_by_ymax": float(removed_by_ymax),
         }
 
+    # Optional per-iteration diagnostics hook used by the solver when available
+    def iteration_diagnostics(
+        self,
+        problem: Problem,
+        state: SolverState,
+        workspace: _HaversineSpeedWorkspace,
+        *,
+        sentinel_count: int = 6,
+        near_epsilon_sec: float = 1.0,
+    ) -> Optional[dict[str, Any]]:
+        try:
+            # Only meaningful if speed constraint is active
+            if not workspace.use_speed or workspace.speed_mps <= 0.0:
+                return None
+
+            device = problem.device
+            generator = state.generator
+
+            free_mask = state.Mb == -1
+            if not bool(free_mask.any()):
+                return None
+            free_idx = torch.nonzero(free_mask, as_tuple=False).squeeze(1)
+            S = min(int(sentinel_count), int(free_idx.numel()))
+            if S <= 0:
+                return None
+
+            if S == int(free_idx.numel()):
+                samp = free_idx
+            else:
+                perm = torch.randperm(int(free_idx.numel()), device=device, generator=generator)
+                samp = free_idx.index_select(0, perm[:S])
+
+            # Distances vs all A in fp32 and fp64 via dot+acos
+            EB_rows_f32 = workspace.EB.index_select(0, samp).to(dtype=torch.float32)
+            EA_T_f32 = workspace.EA_T.to(dtype=torch.float32)
+            cos32 = EB_rows_f32 @ EA_T_f32
+            cos32 = torch.clamp(cos32, -1.0, 1.0)
+            dist32 = torch.acos(cos32) * float(workspace.radius_m)  # [S, N]
+
+            EB_rows_f64 = EB_rows_f32.to(dtype=torch.float64)
+            EA_T_f64 = EA_T_f32.to(dtype=torch.float64)
+            cos64 = EB_rows_f64 @ EA_T_f64
+            cos64 = torch.clamp(cos64, -1.0, 1.0)
+            dist64 = torch.acos(cos64) * float(workspace.radius_m)  # [S, N]
+
+            tA = workspace.times_A.to(dtype=torch.int64)
+            tB_sel = workspace.times_B.index_select(0, samp).to(dtype=torch.int64)
+            speed = float(workspace.speed_mps)
+            N = int(tA.numel())
+            eps = float(near_epsilon_sec)
+
+            sentinels: list[dict[str, Any]] = []
+
+            for row in range(S):
+                b_idx = int(samp[row].item())
+                tB_val = int(tB_sel[row].item())
+
+                # dt over columns [N]
+                dt = (tB_sel[row].view(1, 1) - tA.view(1, -1)).squeeze(0)
+                dt_nonneg = dt >= 0
+
+                d32 = dist32[row, :]
+                d64 = dist64[row, :]
+
+                need32 = (d32 / speed).to(dtype=torch.float32)
+                need64 = (d64 / speed).to(dtype=torch.float64)
+                valid_k32 = dt_nonneg & (dt.to(dtype=need32.dtype) >= need32)
+                valid_o64 = dt_nonneg & (dt.to(dtype=need64.dtype) >= need64)
+
+                eligible = int(dt_nonneg.sum().item())
+                future_invalid = N - eligible
+                kernel_allowed = int(valid_k32.sum().item())
+                oracle_valid = int(valid_o64.sum().item())
+
+                if eligible > 0:
+                    margin32 = dt[dt_nonneg].to(dtype=torch.float32) - need32[dt_nonneg]
+                    margin64 = dt[dt_nonneg].to(dtype=torch.float64) - need64[dt_nonneg]
+                    def _q(vals: torch.Tensor, probs: list[float]) -> list[float]:
+                        q = torch.quantile(vals, torch.tensor(probs, device=vals.device))
+                        return [float(v.item()) for v in q]
+                    probs = [0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0]
+                    q32 = _q(margin32, probs)
+                    q64 = _q(margin64, probs)
+                    near = int((margin64.abs() <= eps).sum().item())
+                else:
+                    q32 = q64 = []
+                    near = 0
+
+                miss_K_mask = valid_o64 & (~valid_k32)
+                miss_O_mask = (~valid_o64) & valid_k32
+                miss_K = int(miss_K_mask.sum().item())
+                miss_O = int(miss_O_mask.sum().item())
+                near_mask64 = (dt.to(dtype=torch.float64) - need64).abs() <= eps
+
+                # Examples (cap to 5)
+                ex_K = []
+                if miss_K > 0:
+                    idxs = torch.nonzero(miss_K_mask, as_tuple=False).squeeze(1)[:5]
+                    for a_idx_t in idxs:
+                        a_i = int(a_idx_t.item())
+                        ex_K.append(
+                            {
+                                "a_idx": a_i,
+                                "dt_s": int(dt[a_i].item()),
+                                "dist32_m": float(d32[a_i].item()),
+                                "dist64_m": float(d64[a_i].item()),
+                                "need_time_s": float((d64[a_i] / speed).item()),
+                                "margin32_s": float((dt[a_i].to(dtype=torch.float32) - need32[a_i]).item()),
+                                "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                            }
+                        )
+
+                ex_O = []
+                if miss_O > 0:
+                    idxs = torch.nonzero(miss_O_mask, as_tuple=False).squeeze(1)[:5]
+                    for a_idx_t in idxs:
+                        a_i = int(a_idx_t.item())
+                        ex_O.append(
+                            {
+                                "a_idx": a_i,
+                                "dt_s": int(dt[a_i].item()),
+                                "dist32_m": float(d32[a_i].item()),
+                                "dist64_m": float(d64[a_i].item()),
+                                "need_time_s": float((d64[a_i] / speed).item()),
+                                "margin32_s": float((dt[a_i].to(dtype=torch.float32) - need32[a_i]).item()),
+                                "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                            }
+                        )
+
+                # Zero-slack and top-5 smallest slacks for this row
+                slack_row = self.compute_slack_tile(samp[row : row + 1], state, workspace)  # [1, N]
+                slack_row = slack_row[0]
+                zero_count = int((slack_row == 0).sum().item())
+                k_top = min(5, N)
+                top_vals, top_idx = torch.topk(slack_row, k_top, largest=False)
+                top_list = []
+                for j in range(k_top):
+                    a_i = int(top_idx[j].item())
+                    top_list.append(
+                        {
+                            "a_idx": a_i,
+                            "slack": int(top_vals[j].item()),
+                            "dt_s": int(dt[a_i].item()),
+                            "dist_km": float((d64[a_i] / 1000.0).item()),
+                            "need_time_s": float((d64[a_i] / speed).item()),
+                            "margin64_s": float((dt[a_i].to(dtype=torch.float64) - need64[a_i]).item()),
+                        }
+                    )
+
+                # Time formatting (UTC ISO)
+                import datetime as _dt
+                tB_iso = _dt.datetime.utcfromtimestamp(tB_val).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                row_payload = {
+                    "b_idx": b_idx,
+                    "tB_epoch": tB_val,
+                    "tB_iso": tB_iso,
+                    "N": N,
+                    "eligible_by_time": eligible,
+                    "future_invalid": future_invalid,
+                    "oracle_valid": oracle_valid,
+                    "kernel_allowed": kernel_allowed,
+                    "miss_kernel": miss_K,
+                    "miss_kernel_near": int((miss_K_mask & near_mask64).sum().item()),
+                    "false_positive": miss_O,
+                    "margin64_quantiles": (
+                        {
+                            "min": q64[0],
+                            "p01": q64[1],
+                            "p10": q64[2],
+                            "p50": q64[3],
+                            "p90": q64[4],
+                            "p99": q64[5],
+                            "max": q64[6],
+                        }
+                        if q64
+                        else None
+                    ),
+                    "margin32_quantiles": (
+                        {
+                            "min": q32[0],
+                            "p01": q32[1],
+                            "p10": q32[2],
+                            "p50": q32[3],
+                            "p90": q32[4],
+                            "p99": q32[5],
+                            "max": q32[6],
+                        }
+                        if q32
+                        else None
+                    ),
+                    "near_boundary_count": near,
+                    "zero_slack_count": zero_count,
+                    "top_slack": top_list,
+                    "miss_kernel_examples": ex_K,
+                    "false_positive_examples": ex_O,
+                }
+                sentinels.append(row_payload)
+
+            return {
+                "iteration": state.iteration,
+                "sentinel_count": S,
+                "speed_mps": float(workspace.speed_mps),
+                "A_count": N,
+                "sentinels": sentinels,
+            }
+        except Exception:
+            # Diagnostics must never interfere with solving
+            return None
+
 
 register_kernel("haversine_speed", HaversineSpeedKernel)
