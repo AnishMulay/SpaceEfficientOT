@@ -385,21 +385,34 @@ class HaversineSpeedKernel(SlackKernel):
             # Distances vs all A in fp32 and fp64 via dot+acos
             EB_rows_f32 = workspace.EB.index_select(0, samp).to(dtype=torch.float32)
             EA_T_f32 = workspace.EA_T.to(dtype=torch.float32)
+            print(
+                f"[haversine_speed.diag] matmul32 shapes EB_rows={tuple(EB_rows_f32.shape)} EA_T={tuple(EA_T_f32.shape)} device={EB_rows_f32.device}"
+            )
             cos32 = EB_rows_f32 @ EA_T_f32
             cos32 = torch.clamp(cos32, -1.0, 1.0)
             dist32 = torch.acos(cos32) * float(workspace.radius_m)  # [S, N]
+            print(
+                f"[haversine_speed.diag] dist32 computed shape={tuple(dist32.shape)} dtype={dist32.dtype} device={dist32.device}"
+            )
 
             EB_rows_f64 = EB_rows_f32.to(dtype=torch.float64)
             EA_T_f64 = EA_T_f32.to(dtype=torch.float64)
+            print(
+                f"[haversine_speed.diag] matmul64 shapes EB_rows={tuple(EB_rows_f64.shape)} EA_T={tuple(EA_T_f64.shape)} device={EB_rows_f64.device}"
+            )
             cos64 = EB_rows_f64 @ EA_T_f64
             cos64 = torch.clamp(cos64, -1.0, 1.0)
             dist64 = torch.acos(cos64) * float(workspace.radius_m)  # [S, N]
+            print(
+                f"[haversine_speed.diag] dist64 computed shape={tuple(dist64.shape)} dtype={dist64.dtype} device={dist64.device}"
+            )
 
             tA = workspace.times_A.to(dtype=torch.int64)
             tB_sel = workspace.times_B.index_select(0, samp).to(dtype=torch.int64)
             speed = float(workspace.speed_mps)
             N = int(tA.numel())
             eps = float(near_epsilon_sec)
+            print(f"[haversine_speed.diag] N={N} speed={speed} eps={eps}")
 
             sentinels: list[dict[str, Any]] = []
 
@@ -428,12 +441,20 @@ class HaversineSpeedKernel(SlackKernel):
                     margin32 = dt[dt_nonneg].to(dtype=torch.float32) - need32[dt_nonneg]
                     margin64 = dt[dt_nonneg].to(dtype=torch.float64) - need64[dt_nonneg]
                     def _q(vals: torch.Tensor, probs: list[float]) -> list[float]:
-                        q = torch.quantile(vals, torch.tensor(probs, device=vals.device))
-                        return [float(v.item()) for v in q]
+                        # Robust quantiles: try device first, then CPU fallback
+                        try:
+                            q = torch.quantile(vals, torch.tensor(probs, device=vals.device))
+                            return [float(v.item()) for v in q]
+                        except Exception:
+                            q = torch.quantile(vals.detach().cpu(), torch.tensor(probs))
+                            return [float(v.item()) for v in q]
                     probs = [0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0]
                     q32 = _q(margin32, probs)
                     q64 = _q(margin64, probs)
-                    near = int((margin64.abs() <= eps).sum().item())
+                    try:
+                        near = int((margin64.abs() <= eps).sum().item())
+                    except Exception:
+                        near = 0
                 else:
                     q32 = q64 = []
                     near = 0
@@ -480,11 +501,18 @@ class HaversineSpeedKernel(SlackKernel):
                         )
 
                 # Zero-slack and top-5 smallest slacks for this row
+                print(f"[haversine_speed.diag] computing slack_row for b_idx={b_idx}")
                 slack_row = self.compute_slack_tile(samp[row : row + 1], state, workspace)  # [1, N]
                 slack_row = slack_row[0]
                 zero_count = int((slack_row == 0).sum().item())
                 k_top = min(5, N)
-                top_vals, top_idx = torch.topk(slack_row, k_top, largest=False)
+                try:
+                    top_vals, top_idx = torch.topk(slack_row, k_top, largest=False)
+                except Exception:
+                    # Fallback: argsort small prefix
+                    sort_idx = torch.argsort(slack_row, stable=True)
+                    top_idx = sort_idx[:k_top]
+                    top_vals = slack_row.index_select(0, top_idx)
                 top_list = []
                 for j in range(k_top):
                     a_i = int(top_idx[j].item())
@@ -558,8 +586,14 @@ class HaversineSpeedKernel(SlackKernel):
             }
             print("[haversine_speed.diag] done; returning payload")
             return payload
-        except Exception:
+        except Exception as e:
             # Diagnostics must never interfere with solving
+            import traceback as _tb
+            try:
+                print(f"[haversine_speed.diag] exception: {type(e).__name__}: {e}")
+                print("[haversine_speed.diag] traceback:\n" + _tb.format_exc())
+            except Exception:
+                pass
             print("[haversine_speed.diag] exception; returning None")
             return None
 
