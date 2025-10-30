@@ -140,7 +140,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="NYC taxi experiment using the Haversine speed slack kernel",
         epilog=(
-            "Example: python experiments/nyc_taxi_speed/run.py "
+            "Example: python experiments/NYC_Taxi_Speed_Haversine/run.py "
             "--input ./data/nyc_taxi_day.parquet --date 2014-10-14 "
             "--n 10000 --device cuda --k 512 --delta 0.01 "
             "--speed-mps 8.0 --y-max-meters 3000 --stopping-condition 1000 --fill-policy none"

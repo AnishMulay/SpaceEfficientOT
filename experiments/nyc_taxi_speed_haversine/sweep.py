@@ -44,7 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Sweep NYC taxi Haversine Speed experiment across n, speed, with per-n stopping conditions",
         epilog=(
-            "Example: python experiments/nyc_taxi_speed/sweep.py "
+            "Example: python experiments/NYC_Taxi_Speed_Haversine/sweep.py "
             "--n 100000,200000,300000 --speeds 8,10,12 --delta 0.001 --C 100000 "
             "--timeout-sec 1800"
         ),
@@ -89,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Output controls
     p.add_argument("--out-dir", dest="out_dir", type=str, default=None,
-                   help="Directory to place sweep outputs (default: experiments/nyc_taxi_speed/outputs/sweep_<ts>)")
+                   help="Directory to place sweep outputs (default: experiments/NYC_Taxi_Speed_Haversine/outputs/sweep_<ts>)")
 
     return p
 
