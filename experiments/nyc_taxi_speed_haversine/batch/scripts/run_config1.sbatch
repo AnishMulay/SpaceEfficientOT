@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16          # CPU cores per task
 #SBATCH -t 02:00:00                 # Max runtime (1 hour)
 #SBATCH -p rtx2060super             # GPU partition
-#SBATCH --gpus=1                    # Request 1 GPU
+#SBATCH --gres=gpu:1                # Request 1 GPU via GRES (cons_res)
 
 set -euo pipefail
 export PYTHONUNBUFFERED=1
