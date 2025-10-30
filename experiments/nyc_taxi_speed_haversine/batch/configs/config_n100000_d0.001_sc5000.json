@@ -1,0 +1,17 @@
+{
+  "input": "/home/amulay2/SpaceEfficientOT/experiments/nyc_taxi_speed_haversine/data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv",
+  "date": "2014-10-14",
+  "n": 100000,
+  "delta": 0.001,
+  "stopping_condition": 5000,
+  "C": 100000.0,
+  "k": 512,
+  "speed_mps": 8.0,
+  "y_max_meters": 100000.0,
+  "future_only": true,
+  "fill_policy": "none",
+  "device": "cuda",
+  "seed": 1,
+  "preview_count": 0
+}
+
