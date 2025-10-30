@@ -8,15 +8,12 @@
 #SBATCH -t 01:00:00
 #SBATCH -p rtx2060super
 
-set -eo pipefail
 export PYTHONUNBUFFERED=1
 
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 if [ -f "$HOME/.bashrc" ]; then
-  set +u
-  source "$HOME/.bashrc" || true
-  set -u
+  source "$HOME/.bashrc"
 fi
 
 PATH=/usr/bin:/bin:$PATH conda activate spefenv
@@ -28,4 +25,3 @@ python -u experiments/nyc_taxi_speed_haversine/batch/run_one.py \
   --print-cmd
 
 conda deactivate || true
-
