@@ -283,54 +283,37 @@ class HaversineSpeedKernel(SlackKernel):
         state: SolverState,
         workspace: _HaversineSpeedWorkspace,
     ) -> Optional[dict[str, Any]]:
-        removed_by_future = 0
-        removed_by_speed = 0
-        removed_by_ymax = 0
+        """
+        Finalize by removing matches whose integerized cost has reached the
+        kernel's cap. This is implemented via a dual-domain threshold:
+        yA[a] + yB[b] >= floor(y_max_meters * scale).
+
+        Future/speed pruning is not repeated here; the kernel already
+        enforces those by assigning large costs, and any resulting zero-slack
+        matches will necessarily push yB to the cap, which this check removes.
+        """
+        removed_by_future = 0.0
+        removed_by_speed = 0.0
+        removed_by_ymax = 0.0
 
         matched_mask = state.Mb != -1
-        if matched_mask.any():
+        if matched_mask.any() and workspace.use_ymax:
             rows = torch.nonzero(matched_mask, as_tuple=False).squeeze(1)
             cols = state.Mb.index_select(0, rows)
 
-            # Compute great-circle distances using the same GEMM-based approach
-            EB_rows = workspace.EB.index_select(0, rows).to(dtype=torch.float64)
-            EA_cols = workspace.EA_T.transpose(0, 1).index_select(0, cols).to(dtype=torch.float64)
-            cos_vals = (EB_rows * EA_cols).sum(dim=1)
-            cos_vals = torch.clamp(cos_vals, -1.0, 1.0)
-            dist = torch.acos(cos_vals) * float(workspace.radius_m)
+            # Dual-domain cap: floor(y_max_meters * scale)
+            y_max_dual = torch.floor(workspace.scale * float(workspace.y_max_m))
+            y_max_dual_i64 = y_max_dual.to(dtype=torch.int64, device=state.yA.device)
 
-            violation_mask = torch.zeros_like(dist, dtype=torch.bool)
+            dual_sum = state.yA.index_select(0, cols) + state.yB.index_select(0, rows)
+            mask_cap = dual_sum >= y_max_dual_i64
 
-            if workspace.future_only or workspace.use_speed:
-                tB = workspace.times_B.index_select(0, rows).to(dtype=torch.int64)
-                tA = workspace.times_A.index_select(0, cols).to(dtype=torch.int64)
-                dt = tB - tA
-            else:
-                dt = None
-
-            if workspace.future_only and dt is not None:
-                mask_future = dt < 0
-                violation_mask |= mask_future
-                removed_by_future = int(mask_future.sum().item())
-            else:
-                mask_future = torch.zeros_like(dist, dtype=torch.bool)
-
-            # Speed-based removal disabled per request; keep metric at 0
-            mask_speed = torch.zeros_like(dist, dtype=torch.bool)
-
-            if workspace.use_ymax:
-                mask_ymax = dist >= workspace.y_max_m
-                violation_mask |= mask_ymax
-                removed_by_ymax = int(mask_ymax.sum().item())
-            else:
-                mask_ymax = torch.zeros_like(dist, dtype=torch.bool)
-
-            if violation_mask.any():
-                bad_idx = torch.nonzero(violation_mask, as_tuple=False).reshape(-1)
-                bad_rows = rows.index_select(0, bad_idx)
-                bad_cols = cols.index_select(0, bad_idx)
+            if bool(mask_cap.any()):
+                bad_rows = rows.index_select(0, torch.nonzero(mask_cap, as_tuple=False).reshape(-1))
+                bad_cols = cols.index_select(0, torch.nonzero(mask_cap, as_tuple=False).reshape(-1))
                 state.Mb[bad_rows] = -1
                 state.Ma[bad_cols] = -1
+                removed_by_ymax = float(mask_cap.sum().item())
 
         feasible_matches = int((state.Mb != -1).sum().item())
         free_B = problem.m - feasible_matches
