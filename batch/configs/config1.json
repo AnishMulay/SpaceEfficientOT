@@ -1,0 +1,17 @@
+{
+  "input": "./data/nyc_taxi_day.parquet",
+  "date": "2014-10-14",
+  "n": 10000,
+  "delta": 0.0001,
+  "stopping_condition": 1000,
+  "C": 100000.0,
+  "k": 512,
+  "speed_mps": 8.0,
+  "y_max_meters": 100000.0,
+  "future_only": true,
+  "fill_policy": "none",
+  "device": "cpu",
+  "seed": 1,
+  "preview_count": 0
+}
+
