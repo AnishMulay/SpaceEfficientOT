@@ -124,6 +124,11 @@ def match(
                 },
             )
 
+        # Track A columns claimed within this outer iteration to avoid
+        # cross-tile contention. This emulates the archive's global
+        # deduplication of A per iteration without materialising S.
+        a_claimed = torch.zeros((problem.n,), dtype=torch.bool, device=torch_device)
+
         for start_idx in range(0, ind_b_all_free.numel(), k):
             end_idx = min(start_idx + k, ind_b_all_free.numel())
             idxB = ind_b_all_free[start_idx:end_idx]
@@ -145,6 +150,19 @@ def match(
             slack_values = kernel_instance.compute_slack_tile(idxB, state, workspace, out=slack_tile)
 
             zero_rows, zero_cols = torch.where(slack_values == 0)
+
+            # Mask out zero-slack entries whose A has already been claimed
+            # by a previous tile in this same outer iteration.
+            if zero_cols.numel() > 0:
+                keep_mask = ~a_claimed.index_select(0, zero_cols)
+                if not bool(keep_mask.all()):
+                    idx_keep = torch.nonzero(keep_mask, as_tuple=False).squeeze(1)
+                    if idx_keep.numel() == 0:
+                        zero_rows = zero_rows.new_empty((0,), dtype=zero_rows.dtype)
+                        zero_cols = zero_cols.new_empty((0,), dtype=zero_cols.dtype)
+                    else:
+                        zero_rows = zero_rows.index_select(0, idx_keep)
+                        zero_cols = zero_cols.index_select(0, idx_keep)
 
             ind_a_push = zero_rows.new_empty((0,), dtype=torch.int64)
             ind_b_push_local = zero_rows.new_empty((0,), dtype=torch.int64)
@@ -183,6 +201,10 @@ def match(
                 state.Ma[ind_a_push] = ind_b_push
                 state.Mb[ind_b_push] = ind_a_push
                 state.yA[ind_a_push] -= 1
+
+                # Mark these A columns as claimed for this iteration so
+                # later tiles do not consider them again.
+                a_claimed[ind_a_push] = True
 
                 add_count = int(ind_a_push.numel())
                 f -= float(add_count - num_release)
