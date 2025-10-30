@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-RUN_PY = REPO_ROOT / "experiments" / "nyc_taxi_speed_haversine" / "run.py"
+EXP_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = EXP_DIR.parents[1]
+RUN_PY = EXP_DIR / "run.py"
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -306,7 +307,7 @@ def main() -> None:
     ap.add_argument("--config", required=True, help="Path to JSON config file")
     ap.add_argument(
         "--results-dir",
-        default=str(Path("batch") / "results" / "nyc_haversine"),
+        default=str(EXP_DIR / "batch" / "results" / "nyc_haversine"),
         help="Directory where per-run outputs are written",
     )
     ap.add_argument("--timeout-sec", type=int, default=3600, help="Max seconds to allow for the experiment (default: 3600)")
@@ -329,4 +330,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

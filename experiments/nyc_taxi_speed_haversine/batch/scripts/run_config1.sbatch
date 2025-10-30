@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J nyc_hav_cfg1             # Job name
-#SBATCH -o batch/logs/%x-%j.out     # Stdout log
-#SBATCH -e batch/logs/%x-%j.err     # Stderr log
+#SBATCH -o experiments/nyc_taxi_speed_haversine/batch/logs/%x-%j.out     # Stdout log
+#SBATCH -e experiments/nyc_taxi_speed_haversine/batch/logs/%x-%j.err     # Stderr log
 #SBATCH -N 1                        # Nodes
 #SBATCH -n 1                        # Tasks
 #SBATCH --cpus-per-task=16          # CPU cores per task
@@ -19,14 +19,13 @@ if [ -f "$HOME/.bashrc" ]; then
   source "$HOME/.bashrc"
 fi
 
-# Activate your environment (edit if needed)
-conda activate gpuenv
+# Activate your environment (CUDA-friendly PATH prefix)
+PATH=/usr/bin:/bin:$PATH conda activate spefenv
 
-python -u batch/run_one.py \
-  --config batch/configs/config1.json \
-  --results-dir batch/results/nyc_haversine \
+python -u experiments/nyc_taxi_speed_haversine/batch/run_one.py \
+  --config experiments/nyc_taxi_speed_haversine/batch/configs/config1.json \
+  --results-dir experiments/nyc_taxi_speed_haversine/batch/results/nyc_haversine \
   --timeout-sec 3600 \
   --print-cmd
 
 conda deactivate || true
-
