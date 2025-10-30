@@ -10,8 +10,7 @@
   "y_max_meters": 100000.0,
   "future_only": true,
   "fill_policy": "none",
-  "device": "cpu",
+  "device": "cuda",
   "seed": 1,
   "preview_count": 0
 }
-
