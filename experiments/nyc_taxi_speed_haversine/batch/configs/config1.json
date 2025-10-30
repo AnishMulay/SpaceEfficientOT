@@ -1,5 +1,5 @@
 {
-  "input": "./data/nyc_taxi_day.parquet",
+  "input": "/home/amulay2/SpaceEfficientOT/experiments/nyc_taxi_speed_haversine/data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv",
   "date": "2014-10-14",
   "n": 10000,
   "delta": 0.0001,
