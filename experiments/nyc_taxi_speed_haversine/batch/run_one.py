@@ -42,6 +42,7 @@ def _run_name_from_config(cfg: Dict[str, Any]) -> str:
     sc = cfg.get("stopping_condition")
     speed = cfg.get("speed_mps")
     delta = cfg.get("delta")
+    y_max = cfg.get("y_max_meters")
     parts = []
     if n is not None:
         parts.append(f"n{int(n)}")
@@ -51,6 +52,8 @@ def _run_name_from_config(cfg: Dict[str, Any]) -> str:
         parts.append(f"v{_fmt_float_compact(float(speed))}")
     if delta is not None:
         parts.append(f"d{_fmt_float_compact(float(delta))}")
+    if y_max is not None:
+        parts.append(f"y{_fmt_float_compact(float(y_max))}")
     if not parts:
         return "run"
     return "_".join(parts)
