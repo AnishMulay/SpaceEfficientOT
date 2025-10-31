@@ -7,7 +7,7 @@
   "C": 100000.0,
   "k": 512,
   "speed_mps": 8.0,
-  "y_max_meters": 20000.0,
+  "y_max_meters": 10000.0,
   "future_only": true,
   "fill_policy": "none",
   "device": "cuda",
