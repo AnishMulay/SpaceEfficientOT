@@ -56,6 +56,10 @@ class ExperimentConfig:
     verbose: bool = True
     out: str | None = None
     no_warmup: bool = False
+    # Optional routes post-processing
+    routes: bool = False
+    routes_json: str | None = None
+    near_thresh_frac: float = 0.9
 
 
 DEFAULT_CONFIG = ExperimentConfig()
@@ -246,6 +250,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Skip the initial warm-up run",
     )
+    # Optional routes post-processing flags
+    parser.add_argument(
+        "--routes",
+        dest="routes",
+        action="store_true",
+        default=None,
+        help="Enable post-processing to reconstruct and analyze taxi routes",
+    )
+    parser.add_argument(
+        "--no-routes",
+        dest="routes",
+        action="store_false",
+        default=None,
+        help="Disable routes post-processing (default)",
+    )
+    parser.add_argument(
+        "--routes-json",
+        dest="routes_json",
+        type=str,
+        default=None,
+        help="Optional path to write routes statistics JSON (separate from --out)",
+    )
+    parser.add_argument(
+        "--near-thresh-frac",
+        dest="near_thresh_frac",
+        type=float,
+        default=None,
+        help="Fraction of y_max to treat as near-threshold for A->B edges (default: 0.9)",
+    )
     return parser
 
 
@@ -270,7 +303,271 @@ def _resolve_paths(config: ExperimentConfig) -> ExperimentConfig:
             out_obj = (EXPERIMENT_DIR / out_obj).resolve()
         out_path = str(out_obj)
 
-    return replace(config, input=str(input_path), out=out_path)
+    routes_json = config.routes_json
+    if routes_json is not None:
+        routes_obj = Path(routes_json)
+        if not routes_obj.is_absolute():
+            routes_obj = (EXPERIMENT_DIR / routes_obj).resolve()
+        routes_json = str(routes_obj)
+
+    return replace(config, input=str(input_path), out=out_path, routes_json=routes_json)
+
+
+def _haversine_distance_pairs(x_from_deg: torch.Tensor, x_to_deg: torch.Tensor) -> torch.Tensor:
+    """Compute Haversine distances (meters) for aligned pairs of points.
+
+    Expects `x_from_deg` and `x_to_deg` to be shape [N, 2] in degrees (lon, lat),
+    and returns a tensor of shape [N] with distances in meters.
+    """
+    if x_from_deg.shape != x_to_deg.shape:
+        raise ValueError("Input tensors must have the same shape for pairwise distances")
+    if x_from_deg.numel() == 0:
+        return x_from_deg.new_empty((0,), dtype=torch.float64)
+
+    lon1 = torch.deg2rad(x_from_deg[:, 0].to(dtype=torch.float64))
+    lat1 = torch.deg2rad(x_from_deg[:, 1].to(dtype=torch.float64))
+    lon2 = torch.deg2rad(x_to_deg[:, 0].to(dtype=torch.float64))
+    lat2 = torch.deg2rad(x_to_deg[:, 1].to(dtype=torch.float64))
+
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+
+    sin_dlat = torch.sin(dlat * 0.5)
+    sin_dlon = torch.sin(dlon * 0.5)
+    a = sin_dlat.square() + torch.cos(lat1) * torch.cos(lat2) * sin_dlon.square()
+    a = torch.clamp(a, min=0.0, max=1.0)
+    c = 2.0 * torch.atan2(torch.sqrt(a), torch.sqrt(torch.clamp(1.0 - a, min=0.0)))
+    return (torch.tensor(6_371_000.0, dtype=torch.float64) * c)
+
+
+def _compute_routes_stats(
+    *,
+    Mb: torch.Tensor,
+    xA: torch.Tensor,
+    xB: torch.Tensor,
+    tA: torch.Tensor,
+    tB: torch.Tensor,
+    y_max_meters: float | None,
+    near_thresh_frac: float,
+) -> dict[str, Any]:
+    """Reconstruct routes from Mb mapping and compute validation + stats.
+
+    Returns a dictionary suitable for JSON serialization.
+    """
+    # Ensure CPU tensors for Python-side indexing and light computations
+    Mb_cpu = Mb.to(dtype=torch.int64).cpu()
+    xA_cpu = xA.to(dtype=torch.float32).cpu()
+    xB_cpu = xB.to(dtype=torch.float32).cpu()
+    tA_cpu = tA.to(dtype=torch.int64).cpu()
+    tB_cpu = tB.to(dtype=torch.int64).cpu()
+
+    nA = int(xA_cpu.shape[0])
+    nB = int(xB_cpu.shape[0])
+    N = min(nA, nB)
+
+    # Build inverse mapping Ma from Mb
+    Ma_cpu = torch.full((nA,), -1, dtype=torch.int64)
+    matched_mask = Mb_cpu != -1
+    if bool(matched_mask.any()):
+        rows = torch.nonzero(matched_mask, as_tuple=False).squeeze(1)
+        cols = Mb_cpu.index_select(0, rows)
+        Ma_cpu[cols] = rows
+
+    # Precompute within-request distances for aligned B[i] -> A[i]
+    # Use only the common prefix length N if shapes differ
+    within_dists = _haversine_distance_pairs(xB_cpu[:N], xA_cpu[:N])  # [N]
+
+    # Route reconstruction: starts are unmatched B
+    starts = torch.nonzero(Mb_cpu[:N] == -1, as_tuple=False).squeeze(1).tolist()
+
+    routes: list[list[int]] = []  # sequences of request indices i
+    route_invalid_flags: list[bool] = []
+    route_invalid_edges: list[int] = []
+    ab_edges_a: list[int] = []  # collect all A->B edges for stats
+    ab_edges_b: list[int] = []
+
+    visited_b_global = torch.zeros((N,), dtype=torch.bool)
+
+    for b0 in starts:
+        route: list[int] = []
+        invalid_route = False
+        invalid_edges_in_route = 0
+        visited_b_local = set()
+
+        i = int(b0)
+        while True:
+            if i in visited_b_local:
+                # Detected a cycle; mark invalid and stop this route
+                invalid_route = True
+                break
+            visited_b_local.add(i)
+            visited_b_global[i] = True
+            route.append(i)
+
+            a_idx = i
+            if a_idx >= nA:
+                # Out-of-range safety (should not happen if N == nA == nB)
+                break
+            b_next = int(Ma_cpu[a_idx].item())
+            if b_next < 0 or b_next >= N:
+                # Reached unmatched A (or out of analyzed range)
+                break
+
+            # Validate A->B transition (feasibility + time)
+            xa = xA_cpu[a_idx].unsqueeze(0)  # [1,2]
+            xb = xB_cpu[b_next].unsqueeze(0)
+            dist_ab = float(_haversine_distance_pairs(xa, xb)[0].item())
+            time_ok = bool(int(tA_cpu[a_idx].item()) <= int(tB_cpu[b_next].item()))
+            edge_ok = True
+            if y_max_meters is not None and y_max_meters > 0.0:
+                edge_ok = edge_ok and (dist_ab < float(y_max_meters))
+            if not time_ok or not edge_ok:
+                invalid_edges_in_route += 1
+                invalid_route = True
+
+            ab_edges_a.append(a_idx)
+            ab_edges_b.append(b_next)
+
+            i = b_next
+
+        routes.append(route)
+        route_invalid_flags.append(bool(invalid_route))
+        route_invalid_edges.append(int(invalid_edges_in_route))
+
+    # Stats across routes
+    num_routes = len(routes)
+    route_lengths = torch.tensor([len(r) for r in routes], dtype=torch.int64)
+
+    # Route distances
+    within_total_per_route: list[float] = []
+    reposition_total_per_route: list[float] = []
+    for r in routes:
+        if not r:
+            within_total_per_route.append(0.0)
+            reposition_total_per_route.append(0.0)
+            continue
+        idx = torch.tensor(r, dtype=torch.int64)
+        wsum = within_dists.index_select(0, idx.clamp_max(N - 1)).sum(dtype=torch.float64)
+        within_total_per_route.append(float(wsum.item()))
+
+        # Reposition edges are between consecutive trips in the route
+        if len(r) <= 1:
+            reposition_total_per_route.append(0.0)
+        else:
+            a_idx_list = torch.tensor(r[:-1], dtype=torch.int64)
+            b_idx_list = torch.tensor(r[1:], dtype=torch.int64)
+            xa = xA_cpu.index_select(0, a_idx_list)
+            xb = xB_cpu.index_select(0, b_idx_list)
+            d = _haversine_distance_pairs(xa, xb).sum(dtype=torch.float64)
+            reposition_total_per_route.append(float(d.item()))
+
+    total_per_route = [w + r for w, r in zip(within_total_per_route, reposition_total_per_route)]
+
+    def _summary_stats(vals: list[float]) -> dict[str, float | None]:
+        if not vals:
+            return {k: None for k in ("min", "max", "mean", "median", "p10", "p90", "p99")}
+        t = torch.tensor(vals, dtype=torch.float64)
+        return {
+            "min": float(t.min().item()),
+            "max": float(t.max().item()),
+            "mean": float(t.mean().item()),
+            "median": float(t.median().item()),
+            "p10": float(torch.quantile(t, 0.10).item()),
+            "p90": float(torch.quantile(t, 0.90).item()),
+            "p99": float(torch.quantile(t, 0.99).item()),
+        }
+
+    # Histograms
+    def _histogram(vals: list[float], bins: int = 20) -> dict[str, Any]:
+        if not vals:
+            return {"bins": [], "counts": []}
+        t = torch.tensor(vals, dtype=torch.float64)
+        vmin = float(t.min().item())
+        vmax = float(t.max().item())
+        if vmax <= vmin:
+            edges = torch.linspace(vmin, vmax + 1e-9, steps=bins + 1, dtype=torch.float64)
+        else:
+            edges = torch.linspace(vmin, vmax, steps=bins + 1, dtype=torch.float64)
+        counts = torch.histc(t, bins=bins, min=vmin, max=vmax)
+        return {
+            "bins": [float(x) for x in edges.tolist()],
+            "counts": [int(x) for x in counts.to(dtype=torch.int64).tolist()],
+        }
+
+    # A->B edges collected across all routes
+    if ab_edges_a:
+        a_idx_tensor = torch.tensor(ab_edges_a, dtype=torch.int64)
+        b_idx_tensor = torch.tensor(ab_edges_b, dtype=torch.int64)
+        xa_all = xA_cpu.index_select(0, a_idx_tensor)
+        xb_all = xB_cpu.index_select(0, b_idx_tensor)
+        ab_dists = _haversine_distance_pairs(xa_all, xb_all)
+        ab_dists_list = [float(x) for x in ab_dists.tolist()]
+    else:
+        ab_dists_list = []
+
+    # Near-threshold fraction among A->B edges
+    near_frac = float(near_thresh_frac)
+    near_threshold_fraction = None
+    if y_max_meters is not None and y_max_meters > 0.0 and ab_dists_list:
+        y_max = float(y_max_meters)
+        lower = near_frac * y_max
+        num_near = sum(1 for d in ab_dists_list if (d >= lower and d < y_max))
+        near_threshold_fraction = num_near / max(1, len(ab_dists_list))
+
+    # Requests unserved: both Mb[i] == -1 and Ma[i] == -1 on same request index
+    requests_unserved = int(((Mb_cpu[:N] == -1) & (Ma_cpu[:N] == -1)).sum().item())
+
+    summary = {
+        "num_routes": int(num_routes),
+        "invalid_routes": int(sum(1 for f in route_invalid_flags if f)),
+        "invalid_edges": int(sum(route_invalid_edges)),
+        "fraction_invalid_routes": (
+            (sum(1 for f in route_invalid_flags if f) / num_routes) if num_routes > 0 else None
+        ),
+        "requests_unserved": requests_unserved,
+        "route_length": {
+            "stats": {
+                "min": (int(route_lengths.min().item()) if num_routes > 0 else None),
+                "max": (int(route_lengths.max().item()) if num_routes > 0 else None),
+                "mean": (float(route_lengths.to(dtype=torch.float64).mean().item()) if num_routes > 0 else None),
+                "median": (int(route_lengths.median().item()) if num_routes > 0 else None),
+                "p10": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.10).item()) if num_routes > 0 else None),
+                "p90": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.90).item()) if num_routes > 0 else None),
+                "p99": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.99).item()) if num_routes > 0 else None),
+            },
+            "hist": _histogram([int(x) for x in route_lengths.tolist()], bins=20),
+        },
+        "route_distance_m": {
+            "within": _summary_stats(within_total_per_route),
+            "reposition": _summary_stats(reposition_total_per_route),
+            "total": _summary_stats(total_per_route),
+        },
+        "edge_distance_m": {
+            "A_to_B": {
+                "stats": _summary_stats(ab_dists_list),
+                "hist": _histogram(ab_dists_list, bins=30),
+                "near_y_max_fraction": near_threshold_fraction,
+            }
+        },
+    }
+
+    # Also include a compact text summary for quick reading
+    compact = {
+        "num_routes": summary["num_routes"],
+        "invalid_routes": summary["invalid_routes"],
+        "invalid_edges": summary["invalid_edges"],
+        "requests_unserved": summary["requests_unserved"],
+        "avg_route_len": summary["route_length"]["stats"]["mean"],
+        "avg_total_dist_km": (
+            (summary["route_distance_m"]["total"]["mean"] / 1000.0)
+            if summary["route_distance_m"]["total"]["mean"] is not None
+            else None
+        ),
+        "near_thresh_frac": near_threshold_fraction,
+    }
+    summary["compact"] = compact
+
+    return summary
 
 
 def main() -> None:
@@ -586,6 +883,46 @@ def main() -> None:
         log(f"\nWrote results to {out_path}")
     else:
         log("\nNo output path provided; results printed to stdout.")
+
+    # Optional routes post-processing
+    if bool(config.routes):
+        log("\n=== Routes Post-Processing (enabled) ===")
+        try:
+            routes_summary = _compute_routes_stats(
+                Mb=result.Mb,
+                xA=xA,
+                xB=xB,
+                tA=tA,
+                tB=tB,
+                y_max_meters=config.y_max_meters,
+                near_thresh_frac=float(config.near_thresh_frac),
+            )
+
+            # Print a short compact summary
+            comp = routes_summary.get("compact", {})
+            log(
+                "Routes: "
+                f"num={comp.get('num_routes')} "
+                f"invalid_routes={comp.get('invalid_routes')} "
+                f"invalid_edges={comp.get('invalid_edges')} "
+                f"unserved={comp.get('requests_unserved')} "
+                f"avg_len={comp.get('avg_route_len')} "
+                f"avg_dist_km={comp.get('avg_total_dist_km')} "
+                f"near_thresh_frac={comp.get('near_thresh_frac')}"
+            )
+
+            # Attach to main JSON output structure for stdout consumers
+            output.setdefault("routes", routes_summary)
+
+            # Optionally write a separate JSON artifact
+            if config.routes_json:
+                rpath = Path(config.routes_json)
+                rpath.parent.mkdir(parents=True, exist_ok=True)
+                with rpath.open("w", encoding="utf-8") as f:
+                    json.dump(routes_summary, f, indent=2)
+                log(f"Routes stats written to {rpath}")
+        except Exception as ex:
+            log(f"Routes post-processing failed: {type(ex).__name__}: {ex}")
 
 
 if __name__ == "__main__":

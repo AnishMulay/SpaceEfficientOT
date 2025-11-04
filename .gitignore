@@ -1,0 +1,12 @@
+# macOS cruft
+.DS_Store
+
+# Experiment outputs (ignored at any depth)
+results/
+outputs/
+output/
+logs/
+
+# Common transient files
+*.log
+*.tmp
