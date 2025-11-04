@@ -558,9 +558,21 @@ def _compute_routes_stats(
         "invalid_edges": summary["invalid_edges"],
         "requests_unserved": summary["requests_unserved"],
         "avg_route_len": summary["route_length"]["stats"]["mean"],
+        "min_route_len": summary["route_length"]["stats"]["min"],
+        "max_route_len": summary["route_length"]["stats"]["max"],
         "avg_total_dist_km": (
             (summary["route_distance_m"]["total"]["mean"] / 1000.0)
             if summary["route_distance_m"]["total"]["mean"] is not None
+            else None
+        ),
+        "min_total_dist_km": (
+            (summary["route_distance_m"]["total"]["min"] / 1000.0)
+            if summary["route_distance_m"]["total"]["min"] is not None
+            else None
+        ),
+        "max_total_dist_km": (
+            (summary["route_distance_m"]["total"]["max"] / 1000.0)
+            if summary["route_distance_m"]["total"]["max"] is not None
             else None
         ),
         "near_thresh_frac": near_threshold_fraction,
@@ -898,18 +910,23 @@ def main() -> None:
                 near_thresh_frac=float(config.near_thresh_frac),
             )
 
-            # Print a short compact summary
+            # Pretty-print a compact multi-line summary
             comp = routes_summary.get("compact", {})
-            log(
-                "Routes: "
-                f"num={comp.get('num_routes')} "
-                f"invalid_routes={comp.get('invalid_routes')} "
-                f"invalid_edges={comp.get('invalid_edges')} "
-                f"unserved={comp.get('requests_unserved')} "
-                f"avg_len={comp.get('avg_route_len')} "
-                f"avg_dist_km={comp.get('avg_total_dist_km')} "
-                f"near_thresh_frac={comp.get('near_thresh_frac')}"
-            )
+            def _fmt(v: Any) -> str:
+                return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+
+            log("Routes Summary:")
+            log(f"  num_routes              : {_fmt(comp.get('num_routes'))}")
+            log(f"  invalid_routes          : {_fmt(comp.get('invalid_routes'))}")
+            log(f"  invalid_edges           : {_fmt(comp.get('invalid_edges'))}")
+            log(f"  requests_unserved       : {_fmt(comp.get('requests_unserved'))}")
+            log(f"  avg_route_len           : {_fmt(comp.get('avg_route_len'))}")
+            log(f"  min_route_len (edges)   : {_fmt(comp.get('min_route_len'))}")
+            log(f"  max_route_len (edges)   : {_fmt(comp.get('max_route_len'))}")
+            log(f"  avg_total_dist_km       : {_fmt(comp.get('avg_total_dist_km'))}")
+            log(f"  min_total_dist_km       : {_fmt(comp.get('min_total_dist_km'))}")
+            log(f"  max_total_dist_km       : {_fmt(comp.get('max_total_dist_km'))}")
+            log(f"  near_thresh_frac        : {_fmt(comp.get('near_thresh_frac'))}")
 
             # Attach to main JSON output structure for stdout consumers
             output.setdefault("routes", routes_summary)
