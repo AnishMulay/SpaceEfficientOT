@@ -324,8 +324,11 @@ def _run_ott_sinkhorn(
             super().__init__()
             self._y_max = y_max
 
-        def pairwise(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-            d = jnp.linalg.norm(x - y)
+        def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+            # x: [Nx,D] or [D]; y: [My,D] or [D]
+            x_ = jnp.atleast_2d(x)
+            y_ = jnp.atleast_2d(y)
+            d = jnp.linalg.norm(x_[:, None, :] - y_[None, :, :], axis=-1)
             if self._y_max is None:
                 return d
             return jnp.where(d >= self._y_max, jnp.inf, d)
@@ -540,4 +543,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
