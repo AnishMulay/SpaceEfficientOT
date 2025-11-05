@@ -122,6 +122,9 @@ def _build_cmd(cfg: Dict[str, Any], out_path: Path, force_no_warmup: bool = True
     if force_no_warmup:
         cmd += ["--no-warmup"]
 
+    # Always enable routes post-processing for batch runs
+    cmd += ["--routes"]
+
     # Artifact path
     cmd += ["--out", str(out_path)]
     return cmd
@@ -166,7 +169,8 @@ def run_once(config_path: Path, results_dir: Path, timeout_sec: int, overwrite: 
     run_name = _run_name_from_config(cfg)
     run_id = _run_id(cfg)
 
-    out_dir = results_dir / run_name
+    date_dir = str(cfg.get("date") or "unknown_date")
+    out_dir = results_dir / date_dir / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     artifact = out_dir / "result.json"

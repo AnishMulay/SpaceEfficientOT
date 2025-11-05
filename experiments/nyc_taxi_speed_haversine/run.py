@@ -436,7 +436,7 @@ def _compute_routes_stats(
 
     # Stats across routes
     num_routes = len(routes)
-    route_lengths = torch.tensor([len(r) for r in routes], dtype=torch.int64)
+    route_lengths = torch.tensor([len(r) for r in routes], dtype=torch.int64) if routes else torch.tensor([], dtype=torch.int64)
 
     # Route distances
     within_total_per_route: list[float] = []
@@ -463,36 +463,11 @@ def _compute_routes_stats(
 
     total_per_route = [w + r for w, r in zip(within_total_per_route, reposition_total_per_route)]
 
-    def _summary_stats(vals: list[float]) -> dict[str, float | None]:
+    def _min_max_mean(vals: list[float]) -> tuple[float | None, float | None, float | None]:
         if not vals:
-            return {k: None for k in ("min", "max", "mean", "median", "p10", "p90", "p99")}
+            return None, None, None
         t = torch.tensor(vals, dtype=torch.float64)
-        return {
-            "min": float(t.min().item()),
-            "max": float(t.max().item()),
-            "mean": float(t.mean().item()),
-            "median": float(t.median().item()),
-            "p10": float(torch.quantile(t, 0.10).item()),
-            "p90": float(torch.quantile(t, 0.90).item()),
-            "p99": float(torch.quantile(t, 0.99).item()),
-        }
-
-    # Histograms
-    def _histogram(vals: list[float], bins: int = 20) -> dict[str, Any]:
-        if not vals:
-            return {"bins": [], "counts": []}
-        t = torch.tensor(vals, dtype=torch.float64)
-        vmin = float(t.min().item())
-        vmax = float(t.max().item())
-        if vmax <= vmin:
-            edges = torch.linspace(vmin, vmax + 1e-9, steps=bins + 1, dtype=torch.float64)
-        else:
-            edges = torch.linspace(vmin, vmax, steps=bins + 1, dtype=torch.float64)
-        counts = torch.histc(t, bins=bins, min=vmin, max=vmax)
-        return {
-            "bins": [float(x) for x in edges.tolist()],
-            "counts": [int(x) for x in counts.to(dtype=torch.int64).tolist()],
-        }
+        return float(t.min().item()), float(t.max().item()), float(t.mean().item())
 
     # A->B edges collected across all routes
     if ab_edges_a:
@@ -517,69 +492,30 @@ def _compute_routes_stats(
     # Requests unserved: both Mb[i] == -1 and Ma[i] == -1 on same request index
     requests_unserved = int(((Mb_cpu[:N] == -1) & (Ma_cpu[:N] == -1)).sum().item())
 
-    summary = {
+    # Length stats
+    min_len = int(route_lengths.min().item()) if num_routes > 0 else None
+    max_len = int(route_lengths.max().item()) if num_routes > 0 else None
+    mean_len = float(route_lengths.to(dtype=torch.float64).mean().item()) if num_routes > 0 else None
+
+    # Total distance stats (km)
+    min_m, max_m, mean_m = _min_max_mean(total_per_route)
+    avg_km = (mean_m / 1000.0) if mean_m is not None else None
+    min_km = (min_m / 1000.0) if min_m is not None else None
+    max_km = (max_m / 1000.0) if max_m is not None else None
+
+    return {
         "num_routes": int(num_routes),
         "invalid_routes": int(sum(1 for f in route_invalid_flags if f)),
         "invalid_edges": int(sum(route_invalid_edges)),
-        "fraction_invalid_routes": (
-            (sum(1 for f in route_invalid_flags if f) / num_routes) if num_routes > 0 else None
-        ),
         "requests_unserved": requests_unserved,
-        "route_length": {
-            "stats": {
-                "min": (int(route_lengths.min().item()) if num_routes > 0 else None),
-                "max": (int(route_lengths.max().item()) if num_routes > 0 else None),
-                "mean": (float(route_lengths.to(dtype=torch.float64).mean().item()) if num_routes > 0 else None),
-                "median": (int(route_lengths.median().item()) if num_routes > 0 else None),
-                "p10": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.10).item()) if num_routes > 0 else None),
-                "p90": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.90).item()) if num_routes > 0 else None),
-                "p99": (int(torch.quantile(route_lengths.to(dtype=torch.float64), 0.99).item()) if num_routes > 0 else None),
-            },
-            "hist": _histogram([int(x) for x in route_lengths.tolist()], bins=20),
-        },
-        "route_distance_m": {
-            "within": _summary_stats(within_total_per_route),
-            "reposition": _summary_stats(reposition_total_per_route),
-            "total": _summary_stats(total_per_route),
-        },
-        "edge_distance_m": {
-            "A_to_B": {
-                "stats": _summary_stats(ab_dists_list),
-                "hist": _histogram(ab_dists_list, bins=30),
-                "near_y_max_fraction": near_threshold_fraction,
-            }
-        },
-    }
-
-    # Also include a compact text summary for quick reading
-    compact = {
-        "num_routes": summary["num_routes"],
-        "invalid_routes": summary["invalid_routes"],
-        "invalid_edges": summary["invalid_edges"],
-        "requests_unserved": summary["requests_unserved"],
-        "avg_route_len": summary["route_length"]["stats"]["mean"],
-        "min_route_len": summary["route_length"]["stats"]["min"],
-        "max_route_len": summary["route_length"]["stats"]["max"],
-        "avg_total_dist_km": (
-            (summary["route_distance_m"]["total"]["mean"] / 1000.0)
-            if summary["route_distance_m"]["total"]["mean"] is not None
-            else None
-        ),
-        "min_total_dist_km": (
-            (summary["route_distance_m"]["total"]["min"] / 1000.0)
-            if summary["route_distance_m"]["total"]["min"] is not None
-            else None
-        ),
-        "max_total_dist_km": (
-            (summary["route_distance_m"]["total"]["max"] / 1000.0)
-            if summary["route_distance_m"]["total"]["max"] is not None
-            else None
-        ),
+        "avg_route_len": mean_len,
+        "min_route_len": min_len,
+        "max_route_len": max_len,
+        "avg_total_dist_km": avg_km,
+        "min_total_dist_km": min_km,
+        "max_total_dist_km": max_km,
         "near_thresh_frac": near_threshold_fraction,
     }
-    summary["compact"] = compact
-
-    return summary
 
 
 def main() -> None:
@@ -885,18 +821,7 @@ def main() -> None:
         },
     }
 
-    print(json.dumps(output, indent=2))
-
-    if config.out:
-        out_path = Path(config.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2)
-        log(f"\nWrote results to {out_path}")
-    else:
-        log("\nNo output path provided; results printed to stdout.")
-
-    # Optional routes post-processing
+    # Optional routes post-processing (attach to output before printing/writing)
     if bool(config.routes):
         log("\n=== Routes Post-Processing (enabled) ===")
         try:
@@ -911,7 +836,7 @@ def main() -> None:
             )
 
             # Pretty-print a compact multi-line summary
-            comp = routes_summary.get("compact", {})
+            comp = routes_summary
             def _fmt(v: Any) -> str:
                 return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
 
@@ -928,8 +853,8 @@ def main() -> None:
             log(f"  max_total_dist_km       : {_fmt(comp.get('max_total_dist_km'))}")
             log(f"  near_thresh_frac        : {_fmt(comp.get('near_thresh_frac'))}")
 
-            # Attach to main JSON output structure for stdout consumers
-            output.setdefault("routes", routes_summary)
+            # Attach to main JSON output structure
+            output["routes"] = routes_summary
 
             # Optionally write a separate JSON artifact
             if config.routes_json:
@@ -940,6 +865,19 @@ def main() -> None:
                 log(f"Routes stats written to {rpath}")
         except Exception as ex:
             log(f"Routes post-processing failed: {type(ex).__name__}: {ex}")
+
+    print(json.dumps(output, indent=2))
+
+    if config.out:
+        out_path = Path(config.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(output, f, indent=2)
+        log(f"\nWrote results to {out_path}")
+    else:
+        log("\nNo output path provided; results printed to stdout.")
+
+    
 
 
 if __name__ == "__main__":
