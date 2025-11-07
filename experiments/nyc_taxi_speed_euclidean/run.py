@@ -105,6 +105,10 @@ class ExperimentConfig:
     no_warmup: bool = False
     origin_lon: float | None = None
     origin_lat: float | None = None
+    # Optional routes post-processing
+    routes: bool = False
+    routes_json: str | None = None
+    near_thresh_frac: float = 0.9
 
 
 DEFAULT_CONFIG = ExperimentConfig()
@@ -172,6 +176,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-warmup", dest="no_warmup", action="store_true", default=None)
     parser.add_argument("--origin-lon", dest="origin_lon", type=float, default=None)
     parser.add_argument("--origin-lat", dest="origin_lat", type=float, default=None)
+    # Optional routes post-processing flags
+    parser.add_argument("--routes", dest="routes", action="store_true", default=None,
+                        help="Enable post-processing to reconstruct and analyze taxi routes")
+    parser.add_argument("--no-routes", dest="routes", action="store_false", default=None,
+                        help="Disable routes post-processing (default)")
+    parser.add_argument("--routes-json", dest="routes_json", type=str, default=None,
+                        help="Optional path to write routes statistics JSON (separate from --out)")
+    parser.add_argument("--near-thresh-frac", dest="near_thresh_frac", type=float, default=None,
+                        help="Fraction of y_max to treat as near-threshold for A->B edges (default: 0.9)")
     return parser
 
 
@@ -196,7 +209,14 @@ def _resolve_paths(config: ExperimentConfig) -> ExperimentConfig:
             out_obj = (EXPERIMENT_DIR / out_obj).resolve()
         out_path = str(out_obj)
 
-    return replace(config, input=str(input_path), out=out_path)
+    routes_json = config.routes_json
+    if routes_json is not None:
+        routes_obj = Path(routes_json)
+        if not routes_obj.is_absolute():
+            routes_obj = (EXPERIMENT_DIR / routes_obj).resolve()
+        routes_json = str(routes_obj)
+
+    return replace(config, input=str(input_path), out=out_path, routes_json=routes_json)
 
 
 def _seed_all(seed: int) -> None:
@@ -232,6 +252,182 @@ def _estimate_c_euclidean(
     max_dist = float(dist.max().item())
     return 4.0 * max_dist
 
+
+def _euclidean_distance_pairs(x_from_m: torch.Tensor, x_to_m: torch.Tensor) -> torch.Tensor:
+    """Compute Euclidean distances (meters) for aligned pairs of points.
+
+    Expects tensors of shape [N,2] in meters; returns shape [N].
+    """
+    if x_from_m.shape != x_to_m.shape:
+        raise ValueError("Input tensors must have the same shape for pairwise distances")
+    if x_from_m.numel() == 0:
+        return x_from_m.new_empty((0,), dtype=torch.float64)
+    diff = (x_to_m.to(dtype=torch.float64) - x_from_m.to(dtype=torch.float64))
+    return torch.linalg.vector_norm(diff, dim=1)
+
+
+def _compute_routes_stats(
+    *,
+    Mb: torch.Tensor,
+    xA_m: torch.Tensor,
+    xB_m: torch.Tensor,
+    tA: torch.Tensor,
+    tB: torch.Tensor,
+    y_max_meters: float | None,
+    near_thresh_frac: float,
+) -> dict[str, Any]:
+    """Reconstruct routes from Mb mapping and compute validation + stats (Euclidean)."""
+    Mb_cpu = Mb.to(dtype=torch.int64).cpu()
+    xA_cpu = xA_m.to(dtype=torch.float32).cpu()
+    xB_cpu = xB_m.to(dtype=torch.float32).cpu()
+    tA_cpu = tA.to(dtype=torch.int64).cpu()
+    tB_cpu = tB.to(dtype=torch.int64).cpu()
+
+    nA = int(xA_cpu.shape[0])
+    nB = int(xB_cpu.shape[0])
+    N = min(nA, nB)
+
+    # Build inverse map Ma from Mb
+    Ma_cpu = torch.full((nA,), -1, dtype=torch.int64)
+    matched_mask = Mb_cpu != -1
+    if bool(matched_mask.any()):
+        rows = torch.nonzero(matched_mask, as_tuple=False).squeeze(1)
+        cols = Mb_cpu.index_select(0, rows)
+        Ma_cpu[cols] = rows
+
+    # Precompute within-request distances for aligned B[i] -> A[i]
+    within_dists = _euclidean_distance_pairs(xB_cpu[:N], xA_cpu[:N])
+
+    # Route starts are unmatched B in the analyzed range
+    starts = torch.nonzero(Mb_cpu[:N] == -1, as_tuple=False).squeeze(1).tolist()
+
+    routes: list[list[int]] = []
+    route_invalid_flags: list[bool] = []
+    route_invalid_edges: list[int] = []
+    ab_edges_a: list[int] = []
+    ab_edges_b: list[int] = []
+
+    for b0 in starts:
+        route: list[int] = []
+        invalid_route = False
+        invalid_edges_in_route = 0
+        visited_b_local = set()
+
+        i = int(b0)
+        while True:
+            if i in visited_b_local:
+                invalid_route = True
+                break
+            visited_b_local.add(i)
+            route.append(i)
+
+            a_idx = i
+            if a_idx >= nA:
+                break
+            b_next = int(Ma_cpu[a_idx].item())
+            if b_next < 0 or b_next >= N:
+                break
+
+            # Validate A->B transition (distance and time)
+            xa = xA_cpu[a_idx].unsqueeze(0)
+            xb = xB_cpu[b_next].unsqueeze(0)
+            dist_ab = float(_euclidean_distance_pairs(xa, xb)[0].item())
+            time_ok = bool(int(tA_cpu[a_idx].item()) <= int(tB_cpu[b_next].item()))
+            edge_ok = True
+            if y_max_meters is not None and y_max_meters > 0.0:
+                edge_ok = edge_ok and (dist_ab < float(y_max_meters))
+            if not time_ok or not edge_ok:
+                invalid_edges_in_route += 1
+                invalid_route = True
+
+            ab_edges_a.append(a_idx)
+            ab_edges_b.append(b_next)
+
+            i = b_next
+
+        routes.append(route)
+        route_invalid_flags.append(bool(invalid_route))
+        route_invalid_edges.append(int(invalid_edges_in_route))
+
+    num_routes = len(routes)
+    route_lengths = (
+        torch.tensor([len(r) for r in routes], dtype=torch.int64)
+        if routes
+        else torch.tensor([], dtype=torch.int64)
+    )
+
+    within_total_per_route: list[float] = []
+    reposition_total_per_route: list[float] = []
+    for r in routes:
+        if not r:
+            within_total_per_route.append(0.0)
+            reposition_total_per_route.append(0.0)
+            continue
+        idx = torch.tensor(r, dtype=torch.int64)
+        wsum = within_dists.index_select(0, idx.clamp_max(N - 1)).sum(dtype=torch.float64)
+        within_total_per_route.append(float(wsum.item()))
+
+        if len(r) <= 1:
+            reposition_total_per_route.append(0.0)
+        else:
+            a_idx_list = torch.tensor(r[:-1], dtype=torch.int64)
+            b_idx_list = torch.tensor(r[1:], dtype=torch.int64)
+            xa = xA_cpu.index_select(0, a_idx_list)
+            xb = xB_cpu.index_select(0, b_idx_list)
+            d = _euclidean_distance_pairs(xa, xb).sum(dtype=torch.float64)
+            reposition_total_per_route.append(float(d.item()))
+
+    total_per_route = [w + r for w, r in zip(within_total_per_route, reposition_total_per_route)]
+
+    def _min_max_mean(vals: list[float]) -> tuple[float | None, float | None, float | None]:
+        if not vals:
+            return None, None, None
+        t = torch.tensor(vals, dtype=torch.float64)
+        return float(t.min().item()), float(t.max().item()), float(t.mean().item())
+
+    # A->B edges collected across all routes
+    if ab_edges_a:
+        a_idx_tensor = torch.tensor(ab_edges_a, dtype=torch.int64)
+        b_idx_tensor = torch.tensor(ab_edges_b, dtype=torch.int64)
+        xa_all = xA_cpu.index_select(0, a_idx_tensor)
+        xb_all = xB_cpu.index_select(0, b_idx_tensor)
+        ab_dists = _euclidean_distance_pairs(xa_all, xb_all)
+        ab_dists_list = [float(x) for x in ab_dists.tolist()]
+    else:
+        ab_dists_list = []
+
+    near_frac = float(near_thresh_frac)
+    near_threshold_fraction = None
+    if y_max_meters is not None and y_max_meters > 0.0 and ab_dists_list:
+        y_max = float(y_max_meters)
+        lower = near_frac * y_max
+        num_near = sum(1 for d in ab_dists_list if (d >= lower and d < y_max))
+        near_threshold_fraction = num_near / max(1, len(ab_dists_list))
+
+    requests_unserved = int(((Mb_cpu[:N] == -1) & (Ma_cpu[:N] == -1)).sum().item())
+
+    min_len = int(route_lengths.min().item()) if num_routes > 0 else None
+    max_len = int(route_lengths.max().item()) if num_routes > 0 else None
+    mean_len = float(route_lengths.to(dtype=torch.float64).mean().item()) if num_routes > 0 else None
+
+    min_m, max_m, mean_m = _min_max_mean(total_per_route)
+    avg_km = (mean_m / 1000.0) if mean_m is not None else None
+    min_km = (min_m / 1000.0) if min_m is not None else None
+    max_km = (max_m / 1000.0) if max_m is not None else None
+
+    return {
+        "num_routes": int(num_routes),
+        "invalid_routes": int(sum(1 for f in route_invalid_flags if f)),
+        "invalid_edges": int(sum(route_invalid_edges)),
+        "requests_unserved": requests_unserved,
+        "avg_route_len": mean_len,
+        "min_route_len": min_len,
+        "max_route_len": max_len,
+        "avg_total_dist_km": avg_km,
+        "min_total_dist_km": min_km,
+        "max_total_dist_km": max_km,
+        "near_thresh_frac": near_thresh_frac,
+    }
 
 def _run_solver(
     *,
@@ -455,6 +651,46 @@ def main() -> None:
         },
     }
 
+    # Optional routes post-processing
+    if bool(config.routes):
+        print("\n=== Routes Post-Processing (enabled) ===")
+        try:
+            routes_summary = _compute_routes_stats(
+                Mb=result.Mb,
+                xA_m=xA_m,
+                xB_m=xB_m,
+                tA=tA,
+                tB=tB,
+                y_max_meters=config.y_max_meters,
+                near_thresh_frac=float(config.near_thresh_frac),
+            )
+            def _fmt(v: Any) -> str:
+                return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+
+            print("Routes Summary:")
+            print(f"  num_routes              : {_fmt(routes_summary.get('num_routes'))}")
+            print(f"  invalid_routes          : {_fmt(routes_summary.get('invalid_routes'))}")
+            print(f"  invalid_edges           : {_fmt(routes_summary.get('invalid_edges'))}")
+            print(f"  requests_unserved       : {_fmt(routes_summary.get('requests_unserved'))}")
+            print(f"  avg_route_len           : {_fmt(routes_summary.get('avg_route_len'))}")
+            print(f"  min_route_len (edges)   : {_fmt(routes_summary.get('min_route_len'))}")
+            print(f"  max_route_len (edges)   : {_fmt(routes_summary.get('max_route_len'))}")
+            print(f"  avg_total_dist_km       : {_fmt(routes_summary.get('avg_total_dist_km'))}")
+            print(f"  min_total_dist_km       : {_fmt(routes_summary.get('min_total_dist_km'))}")
+            print(f"  max_total_dist_km       : {_fmt(routes_summary.get('max_total_dist_km'))}")
+            print(f"  near_thresh_frac        : {_fmt(routes_summary.get('near_thresh_frac'))}")
+
+            output["routes"] = routes_summary
+
+            if config.routes_json:
+                rpath = Path(config.routes_json)
+                rpath.parent.mkdir(parents=True, exist_ok=True)
+                with rpath.open("w", encoding="utf-8") as f:
+                    json.dump(routes_summary, f, indent=2)
+                print(f"Routes stats written to {rpath}")
+        except Exception as ex:
+            print(f"Routes post-processing failed: {type(ex).__name__}: {ex}")
+
     print(json.dumps(output, indent=2))
 
     if config.out:
@@ -469,4 +705,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
