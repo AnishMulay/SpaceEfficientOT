@@ -3,7 +3,7 @@
   "date": "2014-10-14",
   "n": 100000,
   "delta": 0.001,
-  "stopping_condition": 2000,
+  "stopping_condition": 5000,
   "C": 100000.0,
   "k": 512,
   "speed_mps": 8.0,
@@ -14,3 +14,4 @@
   "seed": 1,
   "preview_count": 0
 }
+
