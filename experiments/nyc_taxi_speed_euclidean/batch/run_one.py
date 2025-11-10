@@ -37,6 +37,11 @@ def _fmt_float_compact(x: float) -> str:
 
 
 def _run_name_from_config(cfg: Dict[str, Any]) -> str:
+    """Construct a descriptive run name for the output directory.
+
+    Supports an optional "name_prefix" (e.g., "solune") that will be
+    prepended to the generated name, without affecting command flags.
+    """
     n = cfg.get("n")
     sc = cfg.get("stopping_condition")
     speed = cfg.get("speed_mps")
@@ -53,9 +58,11 @@ def _run_name_from_config(cfg: Dict[str, Any]) -> str:
         parts.append(f"d{_fmt_float_compact(float(delta))}")
     if y_max is not None:
         parts.append(f"y{_fmt_float_compact(float(y_max))}")
-    if not parts:
-        return "run"
-    return "_".join(parts)
+    base = "run" if not parts else "_".join(parts)
+    prefix = cfg.get("name_prefix")
+    if isinstance(prefix, str) and prefix.strip():
+        return f"{prefix.strip()}_{base}"
+    return base
 
 
 def _run_id(cfg: Dict[str, Any]) -> str:
@@ -325,4 +332,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
