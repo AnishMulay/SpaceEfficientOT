@@ -84,7 +84,7 @@ def _project_lonlat_to_meters(
 
 @dataclass
 class ExperimentConfig:
-    input: str = "./data/2014_Yellow_Taxi_Trip_Data_20141014-3.csv"
+    input: str = "./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv"
     date: str = "2014-10-14"
     n: int | None = 100000
     random_sample: bool = True
