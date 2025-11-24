@@ -89,7 +89,7 @@ def _project_lonlat_to_meters(
 @dataclass
 class ExperimentConfig:
     # Data / sampling
-    input: str = "./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv"
+    input: str = "./data/2014_Yellow_Taxi_Trip_Data_20141014-3.csv"
     date: str = "2014-10-14"
     n: int | None = 100000
     random_sample: bool = True
@@ -118,6 +118,7 @@ class ExperimentConfig:
 
     # Output
     out: str = "result/comparison.json"
+    no_warmup: bool = False
 
 
 DEFAULT_CONFIG = ExperimentConfig()
@@ -189,6 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ott-epsilon", dest="ott_epsilon", type=float, default=None)
     p.add_argument("--ott-batch-size", dest="ott_batch_size", type=int, default=None)
     p.add_argument("--threshold", dest="threshold", type=float, default=None)
+    p.add_argument("--no-warmup", dest="no_warmup", action="store_true", default=None)
     return p
 
 
@@ -460,7 +462,31 @@ def main() -> None:
         C = _estimate_c_euclidean(xA_m, xB_m, sample_size=config.c_sample, seed=config.seed)
         print(f"Estimated C value (Euclidean): C={C:.4f} (sample_size={config.c_sample})")
 
+    # --- Warm-up phase (optional) ---
+    # A warm-up run handles first-run costs like JIT compilation (JAX) or CUDA
+    # kernel loading (PyTorch), ensuring the timed run is more representative
+    # of steady-state performance. This is crucial for a fair comparison.
+    if not config.no_warmup:
+        print("\nPerforming warm-up runs (use --no-warmup to skip)...")
+        _, warmup_solver_time = _run_space_efficient(
+            xA_m=xA_m, xB_m=xB_m, C=C, k=config.k, delta=config.delta, device=device,
+            seed=config.seed, times_A=tA, times_B=tB, stopping_condition=config.stopping_condition,
+            speed_mps=config.speed_mps, y_max_meters=config.y_max_meters,
+            future_only=bool(config.future_only), fill_policy=config.fill_policy,
+        )
+        _, warmup_ott_time = _run_ott_sinkhorn(
+            xA_m=xA_m, xB_m=xB_m, y_max_meters=config.y_max_meters,
+            epsilon=float(config.ott_epsilon), batch_size=int(config.ott_batch_size),
+            threshold=float(config.threshold),
+        )
+        print(f"Warm-up finished: Solver ({warmup_solver_time:.2f}s), OTT-JAX ({warmup_ott_time:.2f}s)")
+    else:
+        print("\nSkipping warm-up runs.")
+
+    # --- Timed execution phase ---
+
     # 1) Run space-efficient solver
+    # This solver computes a discrete, optimal matching according to its algorithm.
     print("\nRunning Euclidean solver...")
     solver_result, solver_runtime = _run_space_efficient(
         xA_m=xA_m,
@@ -484,6 +510,9 @@ def main() -> None:
     solver_avg_cost = (solver_total_cost / feasible_matches) if feasible_matches > 0 else None
 
     # 2) Run OTT-JAX Sinkhorn
+    # NOTE: Sinkhorn computes a probabilistic coupling matrix, not a discrete assignment.
+    # To compare, we derive a discrete matching by thresholding the coupling (P > threshold).
+    # This is a common but important methodological difference to be aware of.
     print("\nRunning OTT-JAX Sinkhorn...")
     ott_metrics, ott_runtime = _run_ott_sinkhorn(
         xA_m=xA_m,
