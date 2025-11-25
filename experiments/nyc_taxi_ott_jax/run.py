@@ -143,7 +143,7 @@ class TaxiCost(costs.CostFn):
 
 def main():
     parser = argparse.ArgumentParser(description="NYC Taxi OTT-JAX Experiment")
-    parser.add_argument("--input", type=str, default="./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv")
+    parser.add_argument("--input", type=str, default=None)
     parser.add_argument("--date", type=str, default="2014-10-14")
     parser.add_argument("--n", type=int, default=100000)
     parser.add_argument("--random-sample", action="store_true", default=True)
@@ -157,11 +157,19 @@ def main():
     parser.add_argument("--out", type=str, default=None)
     
     args = parser.parse_args()
-    
+
+    # --- Path Resolution ---
+    # Manually handle path resolution similar to other scripts.
+    # If no input is provided, use the default.
+    input_path_str = args.input or "./data/2014_Yellow_Taxi_Trip_Data_20251014-3.csv"
+    input_path = Path(input_path_str)
+    if not input_path.is_absolute():
+        input_path = (NYC_TAXI_DIR / input_path).resolve()
+
     # Load Data
-    print(f"Loading data from {args.input}...")
+    print(f"Loading data from {input_path}...")
     df, mapping = load_day(
-        args.input,
+        input_path,
         date=args.date,
         n=args.n,
         random_sample=args.random_sample,
@@ -184,13 +192,6 @@ def main():
 
     tA = _to_unix(df[mapping.dropoff_time])
     tB = _to_unix(df[mapping.pickup_time])
-    
-    # Stack into [N, 3] arrays: x, y, t
-    # A is dropoff (supply), B is pickup (demand)
-    # We match A -> B
-    # xA: [N, 3], xB: [M, 3]
-    # Note: In OTT, geom(x, y) usually means cost between x[i] and y[j].
-    # Here we want cost between dropoff A[i] and pickup B[j].
     
     points_A = np.column_stack((xA_m, tA))
     points_B = np.column_stack((xB_m, tB))
@@ -220,30 +221,18 @@ def main():
     print("Starting solver...")
     start_time = time.perf_counter()
     out = solver(geom)
-    # Block until ready
     out.converged.block_until_ready()
     end_time = time.perf_counter()
     
     print(f"Solver finished in {end_time - start_time:.4f}s")
     print(f"Converged: {out.converged}")
     print(f"Regulated OT Cost: {out.reg_ot_cost}")
-    print(f"Primal Cost: {out.primal_cost}")
-    
-    # Metrics
-    # We want to compare with the existing experiment.
-    # Existing experiment reports: feasible matches, free B, removed by constraints, total cost.
-    # OTT Sinkhorn is a soft match (entropic). It produces a coupling matrix P.
-    # We can't easily get "removed by future" counts from the soft coupling without materializing it or doing extra work.
-    # But we can report the total transport cost.
-    
-    # To get comparable metrics, we might need to round the solution or interpret the marginals.
-    # For now, let's report the primal cost and runtime.
     
     results = {
         "runtime_sec": end_time - start_time,
         "converged": bool(out.converged),
         "reg_ot_cost": float(out.reg_ot_cost),
-        "primal_cost": float(out.primal_cost),
+        "primal_cost": float(out.primal_cost) if out.primal_cost is not None else None,
         "n": args.n,
         "epsilon": args.epsilon
     }
@@ -254,6 +243,7 @@ def main():
         print(f"Results written to {args.out}")
     else:
         print(json.dumps(results, indent=2))
+
 
 if __name__ == "__main__":
     main()
