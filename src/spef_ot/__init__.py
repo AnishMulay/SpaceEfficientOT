@@ -7,6 +7,15 @@ so that users can discover and register custom slack kernels.
 """
 
 from .core.solver import MatchResult, match
+from .core.solver_scaling import ScalingMatchResult, scaling_match
 from .kernels.registry import available_kernels, get_kernel, register_kernel
 
-__all__ = ["match", "MatchResult", "available_kernels", "get_kernel", "register_kernel"]
+__all__ = [
+    "match",
+    "MatchResult",
+    "scaling_match",
+    "ScalingMatchResult",
+    "available_kernels",
+    "get_kernel",
+    "register_kernel",
+]

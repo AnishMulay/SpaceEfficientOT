@@ -9,7 +9,7 @@ so that users can discover and register custom slack kernels.
 
 from .solver import MatchResult, match
 from .solver_scaling import ScalingMatchResult, scaling_match
-from .kernels.registry import available_kernels, get_kernel, register_kernel
+from ..kernels.registry import available_kernels, get_kernel, register_kernel
 
 __all__ = [
     "match", 
