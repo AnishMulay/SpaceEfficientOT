@@ -7,8 +7,8 @@ Kernel registration helpers are re-exported from `spef_ot.kernels.registry`
 so that users can discover and register custom slack kernels.
 """
 
-from .core.solver import MatchResult, match
-from .core.solver_scaling import ScalingMatchResult, scaling_match
+from .solver import MatchResult, match
+from .solver_scaling import ScalingMatchResult, scaling_match
 from .kernels.registry import available_kernels, get_kernel, register_kernel
 
 __all__ = [
