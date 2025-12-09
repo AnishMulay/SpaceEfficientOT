@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -80,14 +82,15 @@ def _run_id(cfg: Dict[str, Any]) -> str:
         "fill_policy",
         "device",
         "seed",
-        "preview_count",
+        "origin_lon",
+        "origin_lat",
     )
     sel = {k: cfg.get(k) for k in key_fields}
     payload = json.dumps(sel, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()  # nosec - non-crypto id
 
 
-def _build_cmd(cfg: Dict[str, Any], out_path: Path, force_no_warmup: bool = True) -> list[str]:
+def _build_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
     cmd: list[str] = [sys.executable, str(RUN_PY)]
 
     def add(flag: str, value: Any) -> None:
@@ -110,7 +113,8 @@ def _build_cmd(cfg: Dict[str, Any], out_path: Path, force_no_warmup: bool = True
     add("--speed-mps", cfg.get("speed_mps"))
     add("--y-max-meters", cfg.get("y_max_meters"))
     add("--fill-policy", cfg.get("fill_policy"))
-    add("--preview-count", cfg.get("preview_count"))
+    add("--origin-lon", cfg.get("origin_lon"))
+    add("--origin-lat", cfg.get("origin_lat"))
 
     if cfg.get("random_sample") is True:
         cmd += ["--random-sample"]
@@ -121,11 +125,6 @@ def _build_cmd(cfg: Dict[str, Any], out_path: Path, force_no_warmup: bool = True
         cmd += ["--future-only"]
     elif cfg.get("future_only") is False:
         cmd += ["--no-future-only"]
-
-    # Batch runs: disable warmup and enable routes by default
-    if force_no_warmup:
-        cmd += ["--no-warmup"]
-    cmd += ["--routes"]
 
     cmd += ["--out", str(out_path)]
     return cmd
@@ -164,8 +163,7 @@ def run_once(config_path: Path, results_dir: Path, timeout_sec: int, overwrite: 
     cfg = _parse_config(config_path)
 
     # Useful defaults
-    cfg.setdefault("delta", 0.0001)
-    cfg.setdefault("preview_count", 0)
+    cfg.setdefault("delta", 0.001)
 
     run_name = _run_name_from_config(cfg)
     run_id = _run_id(cfg)
@@ -186,7 +184,7 @@ def run_once(config_path: Path, results_dir: Path, timeout_sec: int, overwrite: 
         except Exception:
             pass
 
-    cmd = _build_cmd(cfg, artifact_tmp, force_no_warmup=True)
+    cmd = _build_cmd(cfg, artifact_tmp)
     if print_cmd:
         print("CMD:", " ".join(cmd))
 
@@ -304,12 +302,76 @@ def run_once(config_path: Path, results_dir: Path, timeout_sec: int, overwrite: 
     return 0, artifact
 
 
+def _append_to_csv(result_data: Dict[str, Any], csv_path: Path, run_id: str) -> None:
+    """Append a flattened summary row to a shared CSV with file locking."""
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    params = result_data.get("params", {}) if isinstance(result_data, dict) else {}
+    perf = result_data.get("performance", {}) if isinstance(result_data, dict) else {}
+    metrics = result_data.get("metrics", {}) if isinstance(result_data, dict) else {}
+
+    fieldnames = [
+        "timestamp",
+        "run_id",
+        "n_requested",
+        "n_used",
+        "delta",
+        "speed_mps",
+        "y_max_meters",
+        "future_only",
+        "fill_policy",
+        "device",
+        "C_estimate",
+        "runtime_sec",
+        "total_phases",
+        "total_iterations",
+        "matching_cost_m",
+        "matching_cost_km",
+        "avg_cost_m",
+        "avg_cost_km",
+        "feasible_matches",
+        "free_B",
+    ]
+
+    row = {
+        "timestamp": _now_iso(),
+        "run_id": run_id,
+        "n_requested": params.get("n_requested"),
+        "n_used": params.get("n_used"),
+        "delta": params.get("delta"),
+        "speed_mps": params.get("speed_mps"),
+        "y_max_meters": params.get("y_max_meters"),
+        "future_only": params.get("future_only"),
+        "fill_policy": params.get("fill_policy"),
+        "device": params.get("device"),
+        "C_estimate": params.get("C_estimate"),
+        "runtime_sec": perf.get("runtime_sec"),
+        "total_phases": perf.get("total_phases"),
+        "total_iterations": perf.get("total_iterations") if perf.get("total_iterations") is not None else perf.get("iterations"),
+        "matching_cost_m": metrics.get("matching_cost_m"),
+        "matching_cost_km": metrics.get("matching_cost_km"),
+        "avg_cost_m": metrics.get("avg_cost_m"),
+        "avg_cost_km": metrics.get("avg_cost_km"),
+        "feasible_matches": metrics.get("feasible_matches"),
+        "free_B": metrics.get("free_B"),
+    }
+
+    with csv_path.open("a+", newline="", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0, os.SEEK_END)
+        needs_header = f.tell() == 0
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if needs_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run a single NYC Euclidean Speed experiment from JSON config")
     ap.add_argument("--config", required=True, help="Path to JSON config file")
     ap.add_argument(
         "--results-dir",
-        default=str(EXP_DIR / "batch" / "results" / "nyc_euclidean"),
+        default=str(EXP_DIR / "batch" / "results"),
         help="Directory where per-run outputs are written",
     )
     ap.add_argument("--timeout-sec", type=int, default=3600, help="Max seconds to allow for the experiment (default: 3600)")
@@ -323,6 +385,18 @@ def main() -> None:
     code, artifact = run_once(cfg_path, results_dir, args.timeout_sec, args.overwrite, args.print_cmd)
     if code == 0:
         print(f"Success: wrote {artifact}")
+        try:
+            result_data = _read_json(artifact)
+            run_meta = {}
+            try:
+                run_meta = _read_json(artifact.parent / "meta.json")
+            except Exception:
+                pass
+            run_id = run_meta.get("run_id") if isinstance(run_meta, dict) else None
+            summary_csv = EXP_DIR / "batch" / "summary_results.csv"
+            _append_to_csv(result_data, summary_csv, run_id or "unknown")
+        except Exception as ex:
+            print(f"Warning: failed to append summary CSV: {ex}")
     elif code == 124:
         print("Timeout: exceeded max runtime; see meta.json for details")
     else:
