@@ -90,7 +90,7 @@ def _run_id(cfg: Dict[str, Any]) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()  # nosec - non-crypto id
 
 
-def _build_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
+def _build_cmd(cfg: Dict[str, Any], out_path: Path, force_no_warmup: bool = True) -> list[str]:
     cmd: list[str] = [sys.executable, str(RUN_PY)]
 
     def add(flag: str, value: Any) -> None:
@@ -125,6 +125,9 @@ def _build_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
         cmd += ["--future-only"]
     elif cfg.get("future_only") is False:
         cmd += ["--no-future-only"]
+
+    if force_no_warmup:
+        cmd += ["--no-warmup"]
 
     cmd += ["--out", str(out_path)]
     return cmd
@@ -184,7 +187,7 @@ def run_once(config_path: Path, results_dir: Path, timeout_sec: int, overwrite: 
         except Exception:
             pass
 
-    cmd = _build_cmd(cfg, artifact_tmp)
+    cmd = _build_cmd(cfg, artifact_tmp, force_no_warmup=True)
     if print_cmd:
         print("CMD:", " ".join(cmd))
 
