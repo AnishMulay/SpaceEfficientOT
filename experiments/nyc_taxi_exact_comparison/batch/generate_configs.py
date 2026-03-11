@@ -5,6 +5,15 @@ Run this locally (or on the login node) once to populate:
   batch/configs/   — one JSON per (solver, n, seed)
   batch/scripts/   — one .sbatch per config
 
+The generated SLURM template intentionally mirrors the working
+`nyc_taxi_speed_euclidean` jobs by default:
+  - `--cpus-per-task=16`
+  - no explicit `--mem` request
+  - same partition / conda activation structure
+
+Memory requests can still be added explicitly via CLI flags if your cluster
+needs them.
+
 Usage
 -----
   python experiments/nyc_taxi_exact_comparison/batch/generate_configs.py \
@@ -56,11 +65,13 @@ FIXED = {
     "k":            512,
 }
 
-# Per-solver SLURM resource spec
+# Per-solver SLURM resource spec.
+# Defaults are aligned with the working Euclidean-speed batch scripts: 16 CPUs
+# and no explicit --mem line unless the user asks for one.
 SLURM_SPEC = {
-    "spef_unscaled": {"time": "00:15:00", "cpus": 8,  "mem": "16G"},
-    "spef_scaled":   {"time": "00:30:00", "cpus": 8,  "mem": "16G"},
-    "ortools":       {"time": "02:00:00", "cpus": 16, "mem": "32G"},
+    "spef_unscaled": {"time": "01:00:00", "cpus": 16, "mem": None},
+    "spef_scaled":   {"time": "01:00:00", "cpus": 16, "mem": None},
+    "ortools":       {"time": "02:00:00", "cpus": 16, "mem": None},
 }
 
 # ---------------------------------------------------------------------------
@@ -120,8 +131,8 @@ def _make_sbatch(
     spec = SLURM_SPEC[solver]
     job_name = f"ec_{solver}_n{n}_s{seed}"
     timeout_sec = {
-        "spef_unscaled": 900,
-        "spef_scaled":   1800,
+        "spef_unscaled": 3600,
+        "spef_scaled":   3600,
         "ortools":       7200,
     }[solver]
 
@@ -139,7 +150,6 @@ def _make_sbatch(
         "#SBATCH -N 1",
         "#SBATCH -n 1",
         f"#SBATCH --cpus-per-task={spec['cpus']}",
-        f"#SBATCH --mem={spec['mem']}",
         f"#SBATCH -t {spec['time']}",
         f"#SBATCH -p {partition}",
         "",
@@ -161,6 +171,8 @@ def _make_sbatch(
         "",
         "conda deactivate || true",
     ]
+    if spec["mem"]:
+        lines.insert(7, f"#SBATCH --mem={spec['mem']}")
     return "\n".join(lines) + "\n"
 
 
@@ -179,11 +191,21 @@ def main() -> None:
     )
     ap.add_argument("--partition", default="rtx2060super", help="SLURM partition (default: rtx2060super)")
     ap.add_argument("--conda-env", default="spefenv", help="Conda environment name (default: spefenv)")
+    ap.add_argument("--spef-mem", default=None,
+                    help="Optional --mem value for spef_unscaled and spef_scaled jobs (default: omit)")
+    ap.add_argument("--ortools-mem", default=None,
+                    help="Optional --mem value for ortools jobs (default: omit)")
     ap.add_argument("--dry-run", action="store_true", help="Print what would be generated without writing")
     args = ap.parse_args()
 
     CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    SLURM_SPEC["spef_unscaled"]["mem"] = args.spef_mem
+    SLURM_SPEC["spef_scaled"]["mem"] = args.spef_mem
+    SLURM_SPEC["ortools"]["mem"] = args.ortools_mem
 
     total = 0
     for solver in SOLVERS:
