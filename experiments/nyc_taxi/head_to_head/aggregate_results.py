@@ -2,17 +2,17 @@
 """
 aggregate_results.py
 ====================
-Post-processing step.  Run this after all SLURM jobs finish:
+Merges all per-job CSVs from batch/results/, then computes mean +/- std
+per (n, method) cell across trials.
 
-    python aggregate_results.py                          # uses default paths
-    python aggregate_results.py --raw results/raw_results.csv
+Run after all SLURM jobs finish:
+    python aggregate_results.py
 
-Reads raw_results.csv and writes two outputs:
-  1. summary_results.csv  — mean ± std per (n, method) cell, one row per cell
-  2. Prints a human-readable table to stdout
+Writes:
+    batch/results/raw_combined.csv   -- all rows merged into one file
+    batch/results/summary.csv        -- mean +/- std per (n, method)
 
-The summary CSV is the one you paste into Claude (or any plotting tool)
-for the next step: plotting and analysis.
+Paste summary.csv here for plotting and analysis.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Metrics to aggregate (column name → display label)
+# Metrics to aggregate
 # ---------------------------------------------------------------------------
 
 METRICS = {
@@ -41,11 +41,6 @@ METHOD_ORDER = ["exact", "unscaled", "scaled"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _load_raw(path: Path) -> list[dict]:
-    with path.open(newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
 
 def _safe_float(v) -> float | None:
     try:
@@ -66,39 +61,60 @@ def _stats(values: list[float]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Core aggregation
+# Load + merge all per-job CSVs
+# ---------------------------------------------------------------------------
+
+def _load_all(results_dir: Path) -> list[dict]:
+    csv_files = sorted(results_dir.glob("results_*.csv"))
+    if not csv_files:
+        print(f"[ERROR] No results_*.csv files found in {results_dir}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    all_rows = []
+    for path in csv_files:
+        with path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+            all_rows.extend(rows)
+
+    print(f"Loaded {len(all_rows)} rows from {len(csv_files)} files.",
+          file=sys.stderr)
+    return all_rows
+
+
+def _write_combined(rows: list[dict], path: Path) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()),
+                           extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate
 # ---------------------------------------------------------------------------
 
 def aggregate(rows: list[dict]) -> list[dict]:
-    """
-    Group by (n, method), compute stats for each metric.
-    Only rows with status='success' are included in stats.
-    Returns a list of flat dicts suitable for CSV writing.
-    """
     from collections import defaultdict
 
-    # cell_data[(n, method)][metric] = [values...]
     cell_data: dict[tuple, dict[str, list]] = defaultdict(lambda: defaultdict(list))
-    cell_counts: dict[tuple, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    cell_counts: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))
 
-    total_rows = len(rows)
     success_rows = 0
-
     for row in rows:
         status = row.get("status", "")
         n_raw  = _safe_float(row.get("n"))
         method = row.get("method", "")
-
         if n_raw is None or not method:
             continue
-
         n = int(n_raw)
-        cell_counts[(n, method)]["total"] = cell_counts[(n, method)].get("total", 0) + 1
+        cell_counts[(n, method)]["total"] += 1
 
         if status != "success":
-            cell_counts[(n, method)][f"status_{status}"] = (
-                cell_counts[(n, method)].get(f"status_{status}", 0) + 1
-            )
+            cell_counts[(n, method)][f"status_{status}"] += 1
             continue
 
         success_rows += 1
@@ -107,45 +123,41 @@ def aggregate(rows: list[dict]) -> list[dict]:
             if v is not None:
                 cell_data[(n, method)][col].append(v)
 
-    print(f"Loaded {total_rows} rows, {success_rows} successful.", file=sys.stderr)
+    print(f"{success_rows} successful rows across "
+          f"{len(cell_data)} (n, method) cells.", file=sys.stderr)
 
-    # Build output rows
-    all_n      = sorted({n for n, _ in cell_data} | {n for n, _ in cell_counts})
+    all_n = sorted({n for n, _ in {**cell_data, **cell_counts}})
     all_methods = METHOD_ORDER + sorted(
-        m for m in {me for _, me in cell_data} if m not in METHOD_ORDER
+        m for m in {me for _, me in {**cell_data, **cell_counts}}
+        if m not in METHOD_ORDER
     )
 
     out_rows = []
     for n in all_n:
         for method in all_methods:
-            key = (n, method)
+            key    = (n, method)
             counts = cell_counts.get(key, {})
             data   = cell_data.get(key, {})
-
             if not counts:
                 continue
 
-            row_out: dict = {
-                "n":             n,
-                "method":        method,
-                "n_jobs_total":  counts.get("total", 0),
-                "n_jobs_success": sum(
-                    v for k, v in counts.items()
-                    if k == "total"   # subtract non-success
-                ) - sum(v for k, v in counts.items() if k != "total"),
+            n_success = len(data.get("runtime_sec", []))
+            row_out = {
+                "n":              n,
+                "method":         method,
+                "n_jobs_total":   counts.get("total", 0),
+                "n_jobs_success": n_success,
             }
-            # cleaner: just count success from data
-            row_out["n_jobs_success"] = len(data.get("runtime_sec", []))
 
             for col in METRICS:
                 vals = data.get(col, [])
                 if vals:
                     s = _stats(vals)
-                    row_out[f"{col}_mean"]  = round(s["mean"], 6)
-                    row_out[f"{col}_std"]   = round(s["std"],  6)
-                    row_out[f"{col}_min"]   = round(s["min"],  6)
-                    row_out[f"{col}_max"]   = round(s["max"],  6)
-                    row_out[f"{col}_n"]     = s["count"]
+                    row_out[f"{col}_mean"] = round(s["mean"], 6)
+                    row_out[f"{col}_std"]  = round(s["std"],  6)
+                    row_out[f"{col}_min"]  = round(s["min"],  6)
+                    row_out[f"{col}_max"]  = round(s["max"],  6)
+                    row_out[f"{col}_n"]    = s["count"]
                 else:
                     for suffix in ("mean", "std", "min", "max", "n"):
                         row_out[f"{col}_{suffix}"] = ""
@@ -156,35 +168,31 @@ def aggregate(rows: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Pretty-print table
+# Pretty table
 # ---------------------------------------------------------------------------
 
 def _print_table(rows: list[dict]) -> None:
-    """Print a compact table of mean ± std for key metrics."""
-    key_metrics = ["runtime_sec", "avg_cost_km", "match_rate"]
-
-    header = f"{'n':>7}  {'method':<10}" + "".join(
-        f"  {METRICS[m]:>22}" for m in key_metrics
+    cols = ["runtime_sec", "avg_cost_km", "match_rate"]
+    hdr  = f"{'n':>7}  {'method':<10}" + "".join(
+        f"  {METRICS[c]:>24}" for c in cols
     )
-    print("\n" + header)
-    print("─" * len(header))
-
+    print("\n" + hdr)
+    print("-" * len(hdr))
     prev_n = None
     for row in rows:
         n = row["n"]
         if n != prev_n and prev_n is not None:
             print()
         prev_n = n
-        method = row["method"]
-        line = f"{n:>7}  {method:<10}"
-        for m in key_metrics:
-            mn  = row.get(f"{m}_mean", "")
-            std = row.get(f"{m}_std",  "")
+        line = f"{n:>7}  {row['method']:<10}"
+        for c in cols:
+            mn  = row.get(f"{c}_mean", "")
+            std = row.get(f"{c}_std",  "")
             if mn != "":
-                cell = f"{float(mn):.4f} ± {float(std):.4f}"
+                cell = f"{float(mn):.4f} +/- {float(std):.4f}"
             else:
                 cell = "n/a"
-            line += f"  {cell:>22}"
+            line += f"  {cell:>24}"
         print(line)
     print()
 
@@ -194,39 +202,36 @@ def _print_table(rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Aggregate raw experiment results")
-    ap.add_argument("--raw", default=None,
-                    help="Path to raw_results.csv "
-                         "(default: results/raw_results.csv next to this script)")
-    ap.add_argument("--out", default=None,
-                    help="Output summary CSV path "
-                         "(default: results/summary_results.csv)")
+    ap = argparse.ArgumentParser(
+        description="Merge per-job CSVs and compute summary statistics")
+    ap.add_argument("--results-dir", default=None,
+                    help="Directory containing results_*.csv files "
+                         "(default: batch/results/ next to this script)")
     args = ap.parse_args()
 
-    here = Path(__file__).resolve().parent
-    raw_path = Path(args.raw) if args.raw else here / "results" / "raw_results.csv"
-    out_path = Path(args.out) if args.out else here / "results" / "summary_results.csv"
+    here        = Path(__file__).resolve().parent
+    results_dir = Path(args.results_dir) if args.results_dir \
+                  else here / "batch" / "results"
 
-    if not raw_path.exists():
-        print(f"[ERROR] raw results file not found: {raw_path}", file=sys.stderr)
-        sys.exit(1)
+    combined_path = results_dir / "raw_combined.csv"
+    summary_path  = results_dir / "summary.csv"
 
-    rows     = _load_raw(raw_path)
-    summary  = aggregate(rows)
+    rows    = _load_all(results_dir)
+    _write_combined(rows, combined_path)
+    print(f"Combined CSV -> {combined_path}", file=sys.stderr)
 
+    summary = aggregate(rows)
     if not summary:
-        print("[WARNING] No successful rows found — nothing to write.", file=sys.stderr)
+        print("[WARNING] No successful rows found.", file=sys.stderr)
         sys.exit(0)
 
-    # Write summary CSV
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(summary[0].keys())
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(summary)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
+        w.writeheader()
+        w.writerows(summary)
 
-    print(f"Summary written → {out_path}  ({len(summary)} rows)")
+    print(f"Summary CSV  -> {summary_path}  ({len(summary)} rows)")
     _print_table(summary)
 
 

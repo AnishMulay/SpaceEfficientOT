@@ -2,149 +2,162 @@
 """
 submit_experiments.py
 =====================
-Single entry point for the NYC Taxi head-to-head experiment.
-Run this on the SLURM login node:
+Generates one .sh SLURM script per (N, method, trial) cell, writes them to
+batch/scripts/, then submits each with sbatch.
 
-    python submit_experiments.py           # submits all jobs
-    python submit_experiments.py --dry-run # prints scripts, submits nothing
-
-One independent SLURM job is submitted per (N, method, trial) cell.
-All jobs write a single row to a shared CSV file; file-locking ensures
-concurrent writes from parallel jobs never corrupt the file.
+Run on the login node:
+    python submit_experiments.py           # generate + submit all jobs
+    python submit_experiments.py --dry-run # generate scripts, do NOT submit
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import datetime as dt
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 # =============================================================================
-# >>>  EDIT THIS SECTION to match your cluster  <<<
+# SLURM settings  (matched exactly to your working cluster config)
 # =============================================================================
 
-SLURM = {
-    "partition":      "gpu",           # partition name on ARC (e.g. "gpu", "volta_gpu")
-    "gres":           "gpu:1",         # GPU resource string
-    "mem":            "32G",           # RAM per job
-    "cpus":           4,               # CPU cores per job
-    "time_unscaled":  "06:00:00",      # wall-time for unscaled jobs (slowest)
-    "time_scaled":    "02:00:00",      # wall-time for scaled jobs
-    "time_exact":     "01:00:00",      # wall-time for exact (scipy) jobs — hard cap
-    # Shell lines that activate your Python environment inside each job.
-    # Replace 'spefot' with your actual conda env name.
-    "env_setup": (
-        "source ~/.bashrc\n"
-        "conda activate spefot"
-    ),
+PARTITION = "rtx2060super"
+CPUS      = 16
+
+WALL_TIME = {
+    "unscaled": "06:00:00",
+    "scaled":   "02:00:00",
+    "exact":    "01:00:00",
 }
 
 # =============================================================================
-# >>>  EXPERIMENT GRID  — edit freely  <<<
+# Experiment grid
 # =============================================================================
 
-N_VALUES = list(range(1000, 16000, 1000))   # [1000, 2000, ..., 15000] — 15 points
-METHODS  = ["unscaled", "scaled", "exact"]
-N_TRIALS = 3        # independent trials per (N, method) cell
-SEED_BASE = 42      # trial i uses seed SEED_BASE + i
+N_VALUES  = list(range(1000, 16000, 1000))   # [1000, 2000, ..., 15000]
+METHODS   = ["unscaled", "scaled", "exact"]
+N_TRIALS  = 3
+SEED_BASE = 42    # trial i  ->  seed = SEED_BASE + i
 
-# Shared solver / data settings passed to every job
-SOLVER_CFG = {
-    "date":          "2014-10-14",
-    "speed_mps":     8.0,
-    "y_max_meters":  10000.0,
-    "k":             512,             # tile size
-    "delta":         0.001,           # target delta for unscaled
-    "C":             10000.0,         # cost scale (= y_max_meters)
-    "fill_policy":   "none",
-    "future_only":   True,
-}
+# Shared solver settings
+DATE         = "2014-10-14"
+SPEED_MPS    = 8.0
+Y_MAX_METERS = 10000.0
+TILE_K       = 512
+DELTA        = 0.01
+C_VALUE      = 100000.0
+FILL_POLICY  = "none"
 
-# Exact jobs run for ALL N values — the 30-min SLURM wall-time is the natural cap.
-# Jobs killed by the scheduler are recorded as status="timeout" in the CSV.
-# Lower this only if a node cannot physically allocate the cost matrix.
-MAX_EXACT_N = 15000   # effectively disabled
+# Exact jobs are attempted for ALL N -- the 1-hour wall-time is the natural cap.
+# Set lower to skip large exact jobs if needed.
+MAX_EXACT_N  = 15000
 
 # =============================================================================
-# Paths  (all relative to this file; nothing hard-coded)
+# Paths  (all relative to this file's location)
 # =============================================================================
 
-HERE         = Path(__file__).resolve().parent
-RESULTS_DIR  = HERE / "results"
-RAW_CSV      = RESULTS_DIR / "raw_results.csv"
-MANIFEST_CSV = RESULTS_DIR / "submitted_jobs.csv"
-LOGS_DIR     = RESULTS_DIR / "logs"
-RUN_SCRIPT   = HERE / "run_experiment.py"
+HERE        = Path(__file__).resolve().parent
+SCRIPTS_DIR = HERE / "batch" / "scripts"
+RESULTS_DIR = HERE / "batch" / "results"
+LOGS_DIR    = HERE / "batch" / "logs"
+RUN_SCRIPT  = HERE / "run_experiment.py"
+MANIFEST    = HERE / "batch" / "submitted_jobs.csv"
 
 # =============================================================================
-# Internal helpers
+# Script template  (mirrors your working generate_batch_jobs.py exactly)
 # =============================================================================
 
-def _wall_time(method: str) -> str:
-    return {"unscaled": SLURM["time_unscaled"],
-            "scaled":   SLURM["time_scaled"],
-            "exact":    SLURM["time_exact"]}[method]
+SLURM_TEMPLATE = """\
+#!/bin/bash
+#SBATCH -J spefot_{method}_n{n}_t{trial}
+#SBATCH -o {logs_dir}/spefot_{method}_n{n}_t{trial}-%j.out
+#SBATCH -e {logs_dir}/spefot_{method}_n{n}_t{trial}-%j.err
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH -t {wall_time}
+#SBATCH -p {partition}
 
+export PYTHONUNBUFFERED=1
 
-def _make_script(n: int, method: str, trial: int, seed: int) -> str:
-    """Return a complete SLURM batch script as a string (no temp files needed)."""
-    job_name = f"spefot_{method}_n{n}_t{trial}"
-    out_log  = LOGS_DIR / f"{job_name}_%j.out"
-    err_log  = LOGS_DIR / f"{job_name}_%j.err"
-    python   = sys.executable   # same interpreter that runs this script
+cd "${{SLURM_SUBMIT_DIR:-$PWD}}"
 
-    args = (
-        f"--n {n} "
-        f"--method {method} "
-        f"--trial {trial} "
-        f"--seed {seed} "
-        f"--results-csv {RAW_CSV} "
-        f"--date {SOLVER_CFG['date']} "
-        f"--speed-mps {SOLVER_CFG['speed_mps']} "
-        f"--y-max-meters {SOLVER_CFG['y_max_meters']} "
-        f"--k {SOLVER_CFG['k']} "
-        f"--delta {SOLVER_CFG['delta']} "
-        f"--C {SOLVER_CFG['C']} "
-        f"--fill-policy {SOLVER_CFG['fill_policy']} "
-        f"--max-exact-n {MAX_EXACT_N} "
-        + ("--future-only" if SOLVER_CFG["future_only"] else "--no-future-only")
+if [ -f "$HOME/.bashrc" ]; then
+  source "$HOME/.bashrc"
+fi
+
+PATH=/usr/bin:/bin:$PATH conda activate spefenv
+
+echo "Starting: method={method}  n={n}  trial={trial}"
+
+python -u {run_script} \\
+  --n {n} \\
+  --method {method} \\
+  --trial {trial} \\
+  --seed {seed} \\
+  --results-csv {results_csv} \\
+  --date {date} \\
+  --speed-mps {speed_mps} \\
+  --y-max-meters {y_max_meters} \\
+  --k {k} \\
+  --delta {delta} \\
+  --C {C} \\
+  --fill-policy {fill_policy} \\
+  --max-exact-n {max_exact_n} \\
+  --future-only
+
+echo "Done:  method={method}  n={n}  trial={trial}  exit=$?"
+
+conda deactivate || true
+"""
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _make_script(n: int, method: str, trial: int, seed: int) -> tuple[str, Path]:
+    """Return (script_content, script_path). Each job writes its own CSV."""
+    results_csv = RESULTS_DIR / f"results_{method}_n{n}_t{trial}.csv"
+    script_path = SCRIPTS_DIR / f"job_{method}_n{n}_t{trial}.sh"
+
+    content = SLURM_TEMPLATE.format(
+        method       = method,
+        n            = n,
+        trial        = trial,
+        seed         = seed,
+        logs_dir     = LOGS_DIR,
+        cpus         = CPUS,
+        wall_time    = WALL_TIME[method],
+        partition    = PARTITION,
+        run_script   = RUN_SCRIPT,
+        results_csv  = results_csv,
+        date         = DATE,
+        speed_mps    = SPEED_MPS,
+        y_max_meters = Y_MAX_METERS,
+        k            = TILE_K,
+        delta        = DELTA,
+        C            = C_VALUE,
+        fill_policy  = FILL_POLICY,
+        max_exact_n  = MAX_EXACT_N,
     )
-
-    return (
-        f"#!/bin/bash\n"
-        f"#SBATCH --job-name={job_name}\n"
-        f"#SBATCH --partition={SLURM['partition']}\n"
-        f"#SBATCH --gres={SLURM['gres']}\n"
-        f"#SBATCH --mem={SLURM['mem']}\n"
-        f"#SBATCH --cpus-per-task={SLURM['cpus']}\n"
-        f"#SBATCH --time={_wall_time(method)}\n"
-        f"#SBATCH --output={out_log}\n"
-        f"#SBATCH --error={err_log}\n"
-        f"\n"
-        f"{SLURM['env_setup']}\n"
-        f"\n"
-        f"echo \"[job start] $(date)  node=$SLURMD_NODENAME  gpu=$CUDA_VISIBLE_DEVICES\"\n"
-        f"\n"
-        f"{python} {RUN_SCRIPT} {args}\n"
-        f"\n"
-        f"echo \"[job end]   $(date)  exit=$?\"\n"
-    )
+    return content, script_path
 
 
-def _sbatch(script: str, dry_run: bool) -> str | None:
-    """Pipe script to sbatch; return job_id string, or None on dry-run/failure."""
+def _submit(script_path: Path, dry_run: bool) -> str | None:
+    """Submit script_path via sbatch; return job_id string or None."""
     if dry_run:
-        print(script)
-        print("─" * 60)
         return None
-    r = subprocess.run(["sbatch", "--parsable"],
-                       input=script, capture_output=True, text=True)
+    r = subprocess.run(
+        ["sbatch", str(script_path)],
+        capture_output=True, text=True,
+    )
     if r.returncode != 0:
-        print(f"[ERROR] sbatch returned {r.returncode}:\n{r.stderr}", file=sys.stderr)
+        print(f"  [ERROR] sbatch failed: {r.stderr.strip()}", file=sys.stderr)
         return None
-    return r.stdout.strip()
+    # sbatch prints "Submitted batch job 12345"
+    return r.stdout.strip().split()[-1]
 
 
 # =============================================================================
@@ -152,74 +165,69 @@ def _sbatch(script: str, dry_run: bool) -> str | None:
 # =============================================================================
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Submit all head-to-head NYC Taxi SLURM jobs")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
-                    help="Print job scripts without submitting anything")
+                    help="Write scripts but do not call sbatch")
     args = ap.parse_args()
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (SCRIPTS_DIR, RESULTS_DIR, LOGS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
 
-    grid = [(n, m, t)
-            for n in N_VALUES
-            for m in METHODS
-            for t in range(N_TRIALS)]
+    grid = [
+        (n, method, trial)
+        for n      in N_VALUES
+        for method in METHODS
+        for trial  in range(N_TRIALS)
+    ]
 
-    total   = len(grid)
-    print(f"Grid : {len(N_VALUES)} N-values × {len(METHODS)} methods × "
-          f"{N_TRIALS} trials = {total} cells")
-    print(f"CSV  : {RAW_CSV}")
-    print(f"Logs : {LOGS_DIR}")
-    print("Mode : DRY RUN\n" if args.dry_run else "")
+    print(f"Grid : {len(N_VALUES)} N-values x {len(METHODS)} methods x "
+          f"{N_TRIALS} trials = {len(grid)} jobs")
+    print(f"Mode : {'DRY RUN -- scripts written, nothing submitted' if args.dry_run else 'SUBMITTING'}\n")
 
-    manifest: list[dict] = []
-    submitted = skipped = failed = 0
+    manifest_rows = []
+    submitted = failed = 0
 
     for n, method, trial in grid:
-        seed = SEED_BASE + trial
+        seed    = SEED_BASE + trial
+        content, script_path = _make_script(n, method, trial, seed)
+        script_path.write_text(content)
+        script_path.chmod(0o755)
 
-        # Skip exact jobs that would OOM on the CPU
-        if method == "exact" and n > MAX_EXACT_N:
-            tag = f"SKIP (n>{MAX_EXACT_N})"
-            print(f"  {tag:<14}  n={n:>6}  {method:<10}  trial={trial}")
-            skipped += 1
-            manifest.append({"submitted_at": dt.datetime.now().isoformat("T", "seconds"),
-                              "job_id": "", "n": n, "method": method,
-                              "trial": trial, "seed": seed, "status": "skipped"})
-            continue
-
-        script = _make_script(n, method, trial, seed)
-        job_id = _sbatch(script, args.dry_run)
+        job_id = _submit(script_path, args.dry_run)
 
         if args.dry_run:
             status = "dry_run"
+            print(f"  wrote  {script_path.name}")
         elif job_id:
             status = "submitted"
             submitted += 1
+            print(f"  submitted  {script_path.name}  ->  job {job_id}")
         else:
             status = "failed"
             failed += 1
+            print(f"  FAILED     {script_path.name}")
 
-        if not args.dry_run:
-            print(f"  {status:<14}  n={n:>6}  {method:<10}  "
-                  f"trial={trial}  job_id={job_id or '—'}")
-        manifest.append({"submitted_at": dt.datetime.now().isoformat("T", "seconds"),
-                         "job_id": job_id or "", "n": n, "method": method,
-                         "trial": trial, "seed": seed, "status": status})
+        manifest_rows.append({
+            "submitted_at": dt.datetime.now().isoformat("T", "seconds"),
+            "job_id":       job_id or "",
+            "n":            n,
+            "method":       method,
+            "trial":        trial,
+            "seed":         seed,
+            "status":       status,
+            "script":       str(script_path),
+        })
 
-    # Write manifest (append-safe)
-    if manifest and not args.dry_run:
-        write_hdr = not MANIFEST_CSV.exists()
-        with MANIFEST_CSV.open("a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(manifest[0].keys()))
+    if not args.dry_run:
+        write_hdr = not MANIFEST.exists()
+        with MANIFEST.open("a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
             if write_hdr:
                 w.writeheader()
-            w.writerows(manifest)
-        print(f"\nManifest → {MANIFEST_CSV}")
+            w.writerows(manifest_rows)
+        print(f"\nManifest -> {MANIFEST}")
 
-    print(f"\nSubmitted={submitted}  Skipped={skipped}  "
-          f"Failed={failed}  Total={total}")
+    print(f"\nSubmitted={submitted}  Failed={failed}  Total={len(grid)}")
 
 
 if __name__ == "__main__":

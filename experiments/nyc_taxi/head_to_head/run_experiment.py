@@ -45,6 +45,7 @@ from spef_ot import match, MatchResult, scaling_match, ScalingMatchResult  # noq
 from loader import load_day                                                  # noqa: E402
 from prepare import prepare_tensors                                          # noqa: E402
 
+import spef_ot.kernels.euclidean_speed
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ def _load_data(args: argparse.Namespace):
     def _to_unix(series):
         if series.dt.tz is not None:
             series = series.dt.tz_convert("UTC").dt.tz_localize(None)
-        return (series.view("int64") // 10 ** 9).to_numpy(np.int64)
+        return (series.astype("int64") // 10 ** 9).to_numpy(np.int64)
 
     tA = _to_unix(df[mapping.dropoff_time])
     tB = _to_unix(df[mapping.pickup_time])
@@ -216,7 +217,7 @@ def run_scaled(xA_m, xB_m, tA, tB, args) -> dict:
         device        = device,
         seed          = args.seed,
         fill_policy   = args.fill_policy,
-        verbose       = False,
+        verbose       = True,
         **_kernel_kwargs(args, tA, tB),
     )
     runtime = time.perf_counter() - t0
@@ -324,7 +325,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--device",        type=str,   default="cuda")
     p.add_argument("--k",             type=int,   default=512)
     p.add_argument("--delta",         type=float, default=0.001)
-    p.add_argument("--C",             type=float, default=10000.0)
+    p.add_argument("--C",             type=float, default=100000.0)
     p.add_argument("--speed-mps",     type=float, default=8.0)
     p.add_argument("--y-max-meters",  type=float, default=10000.0)
     p.add_argument("--fill-policy",   type=str,   default="none")
