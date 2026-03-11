@@ -102,6 +102,11 @@ def _build_spef_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
     add("--origin-lon", "origin_lon")
     add("--origin-lat", "origin_lat")
 
+    if cfg.get("random_sample") is True:
+        cmd.append("--random-sample")
+    elif cfg.get("random_sample") is False:
+        cmd.append("--no-random-sample")
+
     if cfg.get("future_only") is True:
         cmd.append("--future-only")
     elif cfg.get("future_only") is False:
@@ -127,6 +132,11 @@ def _build_ortools_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
     add("--y-max-meters", "y_max_meters")
     add("--origin-lon", "origin_lon")
     add("--origin-lat", "origin_lat")
+
+    if cfg.get("random_sample") is True:
+        cmd.append("--random-sample")
+    elif cfg.get("random_sample") is False:
+        cmd.append("--no-random-sample")
 
     if cfg.get("future_only") is True:
         cmd.append("--future-only")

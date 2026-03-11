@@ -303,6 +303,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input", type=str, default=None)
     p.add_argument("--date", type=str, default=None)
     p.add_argument("--n", type=int, default=None)
+    p.add_argument("--random-sample", dest="random_sample", action="store_true", default=None)
+    p.add_argument("--no-random-sample", dest="random_sample", action="store_false", default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--speed-mps", dest="speed_mps", type=float, default=None)
     p.add_argument("--y-max-meters", dest="y_max_meters", type=float, default=None)
