@@ -61,9 +61,6 @@ EARTH_RADIUS_METERS = 6_371_000.0
 
 # Cost precision: 1 unit = 1 mm  →  max real scaled cost = 10 000 m * 1 000 = 10 000 000
 COST_SCALE = 1_000
-BIG_PENALTY = 100_000_000  # 100 km in mm units — >> any real edge
-
-
 # ---------------------------------------------------------------------------
 # Coordinate projection (identical to run_spef.py)
 # ---------------------------------------------------------------------------
@@ -178,6 +175,7 @@ def _solve(
     from ortools.graph.python import min_cost_flow  # type: ignore[import]
 
     n = len(xA_np)
+    BIG_PENALTY = int(float(y_max_meters) * COST_SCALE) if y_max_meters is not None else int(1e9)
     S = 0
     B_OFFSET = 1
     A_OFFSET = 1 + n
