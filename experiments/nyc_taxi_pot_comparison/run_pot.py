@@ -109,7 +109,7 @@ def _solve(
 
     log("Solving POT partial Wasserstein...")
     t_solve_start = time.perf_counter()
-    gamma = ot.partial_wasserstein(a, b, M, m=m)
+    gamma = ot.partial.partial_wasserstein(a, b, M, m=m)
     solve_time = time.perf_counter() - t_solve_start
     log(f"Solve finished in {solve_time:.3f}s")
 

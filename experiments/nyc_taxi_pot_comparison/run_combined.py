@@ -338,7 +338,7 @@ def _run_pot(
 
     log("Solving POT partial Wasserstein...")
     t_solve_start = time.perf_counter()
-    gamma = ot.partial_wasserstein(a, b, M, m=m)
+    gamma = ot.partial.partial_wasserstein(a, b, M, m=m)
     solve_time = time.perf_counter() - t_solve_start
     total_runtime = build_time + solve_time
     log(f"POT solve finished in {solve_time:.3f}s")
