@@ -205,7 +205,7 @@ def _run_spef_variant(
             device=device,
             seed=config.seed,
             stopping_condition=config.stopping_condition,
-            fill_policy=config.fill_policy,
+            fill_policy="greedy",
             **kernel_kwargs,
         )
         phases = 1
@@ -221,7 +221,7 @@ def _run_spef_variant(
             device=device,
             seed=config.seed,
             stopping_condition=config.stopping_condition,
-            fill_policy=config.fill_policy,
+            fill_policy="greedy",
             verbose=False,
             **kernel_kwargs,
         )
@@ -266,18 +266,6 @@ def _run_spef_variant(
     }
 
 
-def _extract_scaled_top_k(scaled_result: dict[str, Any], n_used: int) -> int:
-    feasible_matches = scaled_result["metrics"].get("feasible_matches")
-    if feasible_matches is None:
-        raise ValueError("Scaled SPEF result is missing feasible_matches.")
-    top_k = int(round(float(feasible_matches)))
-    if abs(float(feasible_matches) - top_k) > 1e-6:
-        raise ValueError(f"Scaled feasible_matches must be integral, got {feasible_matches}.")
-    if not (0 <= top_k <= n_used):
-        raise ValueError(f"Scaled feasible_matches must satisfy 0 <= K <= n_used ({n_used}), got {top_k}.")
-    return top_k
-
-
 def _run_pot(
     *,
     xA_np: np.ndarray,
@@ -285,15 +273,12 @@ def _run_pot(
     tA_np: np.ndarray,
     tB_np: np.ndarray,
     config: ExperimentConfig,
-    top_k: int,
     common_params: dict[str, Any],
     log,
 ) -> dict[str, Any]:
     n = len(xA_np)
     if config.y_max_meters is None:
         raise ValueError("--y-max-meters is required so the POT penalty is well-defined.")
-    if not (0 <= top_k <= n):
-        raise ValueError(f"top_k must satisfy 0 <= top_k <= n_used ({n}), got {top_k}.")
 
     penalty = float(config.y_max_meters) * 2.0
     t_build_start = time.perf_counter()
@@ -304,7 +289,7 @@ def _run_pot(
     tA64 = tA_np.astype(np.float64, copy=False)
     tB64 = tB_np.astype(np.float64, copy=False)
 
-    log(f"Building dense POT cost matrix in batches of {POT_BATCH_ROWS} rows: n={n}, top_k={top_k}")
+    log(f"Building dense POT cost matrix in batches of {POT_BATCH_ROWS} rows: n={n}")
     for row_start in range(0, n, POT_BATCH_ROWS):
         row_end = min(row_start + POT_BATCH_ROWS, n)
         block_diff = xB_np[row_start:row_end, None, :] - xA_np[None, :, :]
@@ -334,12 +319,11 @@ def _run_pot(
 
     a = np.ones(n, dtype=np.float64) / n
     b = np.ones(n, dtype=np.float64) / n
-    m = float(top_k) / float(n) if n > 0 else 0.0
 
     log("Solving POT partial Wasserstein...")
-    print(f"[POT] top_k={top_k}, m={m:.6f}, delta={config.delta}, nb_dummies=10, numItermax=10000000")
+    print(f"[POT] full_emd=True, n={n}, delta={config.delta}, numItermax=10000000")
     t_solve_start = time.perf_counter()
-    gamma = ot.partial.partial_wasserstein(a, b, M, m=m, nb_dummies=10, numItermax=10000000)
+    gamma = ot.emd(a, b, M, numItermax=10000000)
     solve_time = time.perf_counter() - t_solve_start
     total_runtime = build_time + solve_time
     log(f"POT solve finished in {solve_time:.3f}s")
@@ -348,11 +332,9 @@ def _run_pot(
     opt_cost_km = opt_cost_m / 1000.0
 
     pot_params = dict(common_params)
-    pot_params["top_k"] = top_k
-    pot_params["top_k_source"] = "spef_scaled"
 
     return {
-        "solver": "pot_partial",
+        "solver": "pot_emd",
         "params": pot_params,
         "performance": {
             "runtime_sec": total_runtime,
@@ -363,8 +345,8 @@ def _run_pot(
         "metrics": {
             "opt_cost_m": opt_cost_m,
             "opt_cost_km": opt_cost_km,
-            "opt_avg_cost_m": (opt_cost_m / top_k) if top_k > 0 else None,
-            "opt_avg_cost_km": (opt_cost_km / top_k) if top_k > 0 else None,
+            "opt_avg_cost_m": (opt_cost_m / n) if n > 0 else None,
+            "opt_avg_cost_km": (opt_cost_km / n) if n > 0 else None,
         },
     }
 
@@ -444,8 +426,7 @@ def main() -> None:
         common_params=common_params,
     )
 
-    top_k = _extract_scaled_top_k(spef_scaled, len(df))
-    log(f"Running POT phase with top_k={top_k} from spef_scaled...")
+    log("Running POT phase with full EMD...")
 
     xA_np = xA_m.detach().cpu().numpy().astype(np.float64, copy=False)
     xB_np = xB_m.detach().cpu().numpy().astype(np.float64, copy=False)
@@ -457,7 +438,6 @@ def main() -> None:
         tA_np=tA_np,
         tB_np=tB_np,
         config=config,
-        top_k=top_k,
         common_params=common_params,
         log=log,
     )
