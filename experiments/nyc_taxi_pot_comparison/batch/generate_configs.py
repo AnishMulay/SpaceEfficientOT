@@ -79,11 +79,11 @@ def _make_sbatch(
     run_one_rel_path = "experiments/nyc_taxi_pot_comparison/batch/run_one.py"
     logs_rel_path = "experiments/nyc_taxi_pot_comparison/batch/logs"
 
-    lines = [
-        "#!/bin/bash",
-        f"#SBATCH -J {job_name}",
-        f"#SBATCH -o {logs_rel_path}/%x-%j.out",
-        f"#SBATCH -e {logs_rel_path}/%x-%j.err",
+     lines = [
+         "#!/bin/bash",
+         f"#SBATCH -J {job_name}",
+         f"#SBATCH -o {logs_rel_path}/%x-%j.out",
+         f"#SBATCH -e {logs_rel_path}/%x-%j.err",
         "#SBATCH -N 1",
         "#SBATCH -n 1",
         f"#SBATCH --cpus-per-task={SLURM_SPEC['cpus']}",
@@ -94,17 +94,17 @@ def _make_sbatch(
         "",
         'cd "${SLURM_SUBMIT_DIR:-$PWD}"',
         "",
-        'if [ -f "$HOME/.bashrc" ]; then',
-        '  source "$HOME/.bashrc"',
-        "fi",
-        "",
+         'if [ -f "$HOME/.bashrc" ]; then',
+         '  source "$HOME/.bashrc"',
+         "fi",
+         "",
         f"PATH=/usr/bin:/bin:$PATH conda activate {conda_env}",
         "",
         f"python -u {run_one_rel_path} \\",
-        f"  --config {config_rel_path} \\",
-        f"  --results-dir {results_rel_path} \\",
-        f"  --timeout-sec {timeout_sec} \\",
-        "  --print-cmd",
+         f"  --config {config_rel_path} \\",
+         f"  --results-dir {results_rel_path} \\",
+         f"  --timeout-sec {timeout_sec} \\",
+         "  --print-cmd",
         "",
         "conda deactivate || true",
     ]
