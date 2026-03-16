@@ -81,8 +81,8 @@ class ExperimentConfig:
     delta: float = 0.0001
     stopping_condition: int | None = 50
     C: float | None = 100000.0
-    speed_mps: float | None = 8.0
-    y_max_meters: float | None = 10000.0
+    speed_mps: float | None = None
+    y_max_meters: float | None = None
     future_only: bool = True
     fill_policy: str = "none"
     out: str | None = None
@@ -351,6 +351,162 @@ def _run_pot(
     }
 
 
+def _run_ortools(
+    *,
+    xA_np: np.ndarray,
+    xB_np: np.ndarray,
+    tA_np: np.ndarray,
+    tB_np: np.ndarray,
+    config: ExperimentConfig,
+    common_params: dict[str, Any],
+    log,
+) -> dict[str, Any]:
+    from ortools.graph.python import min_cost_flow  # type: ignore[import]
+
+    COST_SCALE = 1000
+    n = len(xA_np)
+    BIG_PENALTY = (
+        int(float(config.y_max_meters) * COST_SCALE)
+        if config.y_max_meters is not None
+        else int(1e9)
+    )
+    S = 0
+    B_OFFSET = 1
+    A_OFFSET = 1 + n
+    DUMMY = 1 + 2 * n
+    T = 2 + 2 * n
+    num_nodes = T + 1
+
+    log(f"Building feasibility graph: n={n}, nodes={num_nodes}")
+    t_build_start = time.perf_counter()
+
+    src: list[int] = []
+    dst: list[int] = []
+    cap: list[int] = []
+    cost: list[int] = []
+
+    for j in range(n):
+        src.append(S)
+        dst.append(B_OFFSET + j)
+        cap.append(1)
+        cost.append(0)
+
+    num_feasible = 0
+    for j_start in range(0, n, POT_BATCH_ROWS):
+        j_end = min(j_start + POT_BATCH_ROWS, n)
+        xB_batch = xB_np[j_start:j_end]
+        tB_batch = tB_np[j_start:j_end]
+
+        diff = xB_batch[:, None, :] - xA_np[None, :, :]
+        dists = np.sqrt((diff * diff).sum(axis=2))
+        dt = tB_batch[:, None].astype(np.float64) - tA_np[None, :].astype(np.float64)
+
+        mask = np.ones((j_end - j_start, n), dtype=bool)
+
+        if config.future_only:
+            mask &= dt >= 0
+
+        if config.y_max_meters is not None:
+            mask &= dists < float(config.y_max_meters)
+
+        if config.speed_mps is not None:
+            pos_dt = dt > 0
+            mask &= pos_dt | (dists < 1e-3)
+            max_dist = np.where(pos_dt, float(config.speed_mps) * dt, 0.0)
+            mask &= dists <= max_dist + 1e-3
+
+        batch_b_idx, a_idx = np.where(mask)
+        abs_j = j_start + batch_b_idx
+
+        if a_idx.size > 0:
+            pair_dists = dists[batch_b_idx, a_idx]
+            pair_costs = (pair_dists * COST_SCALE).astype(np.int64)
+            src.extend((B_OFFSET + abs_j).tolist())
+            dst.extend((A_OFFSET + a_idx).tolist())
+            cap.extend([1] * int(a_idx.size))
+            cost.extend(pair_costs.tolist())
+            num_feasible += int(a_idx.size)
+
+    for j in range(n):
+        src.append(B_OFFSET + j)
+        dst.append(DUMMY)
+        cap.append(1)
+        cost.append(BIG_PENALTY)
+
+    for i in range(n):
+        src.append(A_OFFSET + i)
+        dst.append(T)
+        cap.append(1)
+        cost.append(0)
+
+    src.append(DUMMY)
+    dst.append(T)
+    cap.append(n)
+    cost.append(0)
+
+    build_time = time.perf_counter() - t_build_start
+    log(f"Graph built: {len(src)} arcs ({num_feasible} feasible B->A)  [{build_time:.2f}s]")
+
+    smcf = min_cost_flow.SimpleMinCostFlow()
+    for s, e, c, u in zip(src, dst, cap, cost):
+        smcf.add_arc_with_capacity_and_unit_cost(s, e, c, u)
+    smcf.set_node_supply(S, n)
+    smcf.set_node_supply(T, -n)
+
+    log("Solving min-cost flow...")
+    t_solve_start = time.perf_counter()
+    status = smcf.solve()
+    solve_time = time.perf_counter() - t_solve_start
+    total_runtime = build_time + solve_time
+    log(f"Solve finished in {solve_time:.3f}s  status={status}")
+
+    if status != smcf.OPTIMAL:
+        raise RuntimeError(
+            f"OR-Tools min-cost flow did not reach OPTIMAL (status={status}). "
+            "Check feasibility or increase BIG_PENALTY."
+        )
+
+    total_cost_scaled = 0
+    feasible_matches = 0
+    free_B = 0
+
+    for arc in range(smcf.num_arcs()):
+        if smcf.flow(arc) == 0:
+            continue
+        s_node = smcf.tail(arc)
+        e_node = smcf.head(arc)
+        if B_OFFSET <= s_node < B_OFFSET + n:
+            if A_OFFSET <= e_node < A_OFFSET + n:
+                feasible_matches += 1
+                total_cost_scaled += smcf.unit_cost(arc)
+            elif e_node == DUMMY:
+                free_B += 1
+
+    total_cost_m = total_cost_scaled / COST_SCALE
+    total_cost_km = total_cost_m / 1000.0
+
+    ortools_params = dict(common_params)
+
+    return {
+        "solver": "ortools_exact",
+        "params": ortools_params,
+        "performance": {
+            "runtime_sec": total_runtime,
+            "build_time_sec": build_time,
+            "solve_time_sec": solve_time,
+            "num_feasible_edges": num_feasible,
+        },
+        "metrics": {
+            "opt_cost_m": total_cost_m,
+            "opt_cost_km": total_cost_km,
+            "opt_avg_cost_m": (total_cost_m / feasible_matches) if feasible_matches > 0 else None,
+            "opt_avg_cost_km": (total_cost_km / feasible_matches) if feasible_matches > 0 else None,
+            "feasible_matches": feasible_matches,
+            "free_B": free_B,
+        },
+    }
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -426,13 +582,13 @@ def main() -> None:
         common_params=common_params,
     )
 
-    log("Running POT phase with full EMD...")
+    log("Running OR-Tools exact solver...")
 
     xA_np = xA_m.detach().cpu().numpy().astype(np.float64, copy=False)
     xB_np = xB_m.detach().cpu().numpy().astype(np.float64, copy=False)
     tA_np = tA.detach().cpu().numpy()
     tB_np = tB.detach().cpu().numpy()
-    pot_result = _run_pot(
+    pot_result = _run_ortools(
         xA_np=xA_np,
         xB_np=xB_np,
         tA_np=tA_np,
