@@ -34,7 +34,8 @@ FIXED = {
 }
 
 SLURM_SPEC = {
-    "combined": {"time": "03:00:00", "cpus": 16, "mem": None},
+    "time": "03:00:00",
+    "cpus": 16,
 }
 
 BATCH_DIR = Path(__file__).resolve().parent
@@ -70,7 +71,6 @@ def _make_sbatch(
     partition: str,
     conda_env: str,
 ) -> str:
-    spec = SLURM_SPEC["combined"]
     timeout_sec = 10800
     job_name = f"pc_combined_n{n}_s{seed}"
 
@@ -86,8 +86,8 @@ def _make_sbatch(
         f"#SBATCH -e {logs_rel_path}/%x-%j.err",
         "#SBATCH -N 1",
         "#SBATCH -n 1",
-        f"#SBATCH --cpus-per-task={spec['cpus']}",
-        f"#SBATCH -t {spec['time']}",
+        f"#SBATCH --cpus-per-task={SLURM_SPEC['cpus']}",
+        f"#SBATCH -t {SLURM_SPEC['time']}",
         f"#SBATCH -p {partition}",
         "",
         "export PYTHONUNBUFFERED=1",
@@ -108,26 +108,34 @@ def _make_sbatch(
         "",
         "conda deactivate || true",
     ]
-    if spec["mem"]:
-        lines.insert(7, f"#SBATCH --mem={spec['mem']}")
     return "\n".join(lines) + "\n"
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate configs + sbatch scripts for combined jobs")
-    ap.add_argument("--input", required=True, help="Absolute path to the NYC taxi CSV on the cluster")
-    ap.add_argument("--partition", default="rtx2060super", help="SLURM partition (default: rtx2060super)")
-    ap.add_argument("--conda-env", default="spefenv", help="Conda environment name (default: spefenv)")
-    ap.add_argument("--combined-mem", default=None, help="Optional --mem value for combined jobs")
-    ap.add_argument("--dry-run", action="store_true", help="Print what would be generated without writing")
+    ap = argparse.ArgumentParser(
+        description="Generate configs + sbatch scripts for combined jobs"
+    )
+    ap.add_argument(
+        "--input",
+        required=True,
+        help="Absolute path to the NYC taxi CSV on the cluster",
+    )
+    ap.add_argument(
+        "--partition",
+        default="rtx2060super",
+        help="SLURM partition (default: rtx2060super)",
+    )
+    ap.add_argument(
+        "--conda-env",
+        default="spefenv",
+        help="Conda environment name (default: spefenv)",
+    )
     args = ap.parse_args()
 
     CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-    SLURM_SPEC["combined"]["mem"] = args.combined_mem
 
     total = 0
     for n in N_VALUES:
@@ -147,23 +155,17 @@ def main() -> None:
             cfg_path = CONFIGS_DIR / f"{cname}.json"
             script_path = SCRIPTS_DIR / f"{sname}.sbatch"
 
-            if args.dry_run:
-                print(f"[DRY] {cfg_path.name} -> {script_path.name}")
-            else:
-                with cfg_path.open("w", encoding="utf-8") as f:
-                    json.dump(cfg, f, indent=2)
-                with script_path.open("w", encoding="utf-8") as f:
-                    f.write(sbatch)
-                script_path.chmod(0o755)
+            with cfg_path.open("w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            with script_path.open("w", encoding="utf-8") as f:
+                f.write(sbatch)
+            script_path.chmod(0o755)
 
             total += 1
 
-    if args.dry_run:
-        print(f"[DRY RUN] Would generate {total} config + script pairs.")
-    else:
-        print(f"Generated {total} config + script pairs.")
-        print(f"  configs -> {CONFIGS_DIR}")
-        print(f"  scripts -> {SCRIPTS_DIR}")
+    print(f"Generated {total} config + script pairs.")
+    print(f"  configs -> {CONFIGS_DIR}")
+    print(f"  scripts -> {SCRIPTS_DIR}")
 
 
 if __name__ == "__main__":
