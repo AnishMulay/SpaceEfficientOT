@@ -101,7 +101,7 @@ def _make_sbatch(
         "export PATH=/usr/bin:/bin:$PATH",
         f"conda activate {conda_env}",
         "",
-        f"python -u {run_one_rel_path} \\",
+        f"python3 -u {run_one_rel_path} \\",
         f"  --config {config_rel_path} \\",
         f"  --results-dir {results_rel_path} \\",
         f"  --timeout-sec {timeout_sec} \\",
