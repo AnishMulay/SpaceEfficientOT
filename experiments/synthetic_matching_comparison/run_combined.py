@@ -41,7 +41,8 @@ def _estimate_C(xA: np.ndarray, xB: np.ndarray, seed: int) -> float:
 
 
 def _run_spef(xA: np.ndarray, xB: np.ndarray, *, n: int, C: float,
-              k: int, delta: float, device: str, seed: int) -> dict:
+              k: int, delta: float, device: str, seed: int,
+              stopping_condition: int) -> dict:
     xA_t = torch.from_numpy(xA).to(device)
     xB_t = torch.from_numpy(xB).to(device)
     if device == "cuda":
@@ -55,6 +56,7 @@ def _run_spef(xA: np.ndarray, xB: np.ndarray, *, n: int, C: float,
         target_delta=delta,
         device=device,
         seed=seed,
+        stopping_condition=stopping_condition,
         fill_policy="greedy",
         verbose=False,
     )
@@ -106,7 +108,7 @@ def main() -> None:
     p.add_argument("--seed",   type=int,   default=1)
     p.add_argument("--device", type=str,   default="cuda")
     p.add_argument("--k",      type=int,   default=512)
-    p.add_argument("--delta",  type=float, default=0.001)
+    p.add_argument("--delta",  type=float, default=0.01)
     p.add_argument("--dim",    type=int,   default=2)
     p.add_argument("--out",    type=str,   default=None)
     args = p.parse_args()
@@ -126,8 +128,10 @@ def main() -> None:
     C = _estimate_C(xA, xB, seed)
 
     print("\n--- SPEF scaled ---", flush=True)
+    stopping_condition = max(1, int(args.delta * n))
     spef = _run_spef(xA, xB, n=n, C=C, k=args.k, delta=args.delta,
-                     device=args.device, seed=seed)
+                     device=args.device, seed=seed,
+                     stopping_condition=stopping_condition)
 
     print("\n--- POT EMD ---", flush=True)
     pot = _run_pot(xA, xB, n=n)
@@ -151,6 +155,7 @@ def main() -> None:
         "params": {
             "n": n, "seed": seed, "delta": args.delta,
             "C": C, "k": args.k, "dim": dim, "device": args.device,
+            "stopping_condition": stopping_condition,
         },
         "spef": spef,
         "pot": pot,
