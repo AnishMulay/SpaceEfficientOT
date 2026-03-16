@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Submit all synthetic comparison sbatch scripts to the SLURM scheduler."""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+BATCH_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = BATCH_DIR / "scripts"
+
+
+def _parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Submit synthetic comparison sbatch jobs to SLURM")
+    ap.add_argument(
+        "--solvers",
+        nargs="+",
+        choices=["combined_synthetic"],
+        default=None,
+        help="Restrict to these solvers (default: all available solvers)",
+    )
+    ap.add_argument(
+        "--n",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Restrict to these n values, e.g. --n 1000 2000 5000",
+    )
+    ap.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Restrict to these seeds (default: all seeds)",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print sbatch commands without submitting",
+    )
+    ap.add_argument(
+        "--scripts-dir",
+        default=str(SCRIPTS_DIR),
+        help=f"Directory containing .sbatch files (default: {SCRIPTS_DIR})",
+    )
+    return ap.parse_args()
+
+
+def _matches_filter(
+    script_name: str,
+    solvers: list[str] | None,
+    n_filter: list[int] | None,
+    seed_filter: list[int] | None,
+) -> bool:
+    """Return True if the script filename satisfies all active filters."""
+    if solvers is not None:
+        if "combined_synthetic" in solvers and not script_name.startswith("run_combined_synthetic_n"):
+            return False
+
+    if n_filter is not None:
+        if not any(f"_n{n}_" in script_name for n in n_filter):
+            return False
+
+    if seed_filter is not None:
+        if not any(script_name.endswith(f"_seed{seed}.sbatch") for seed in seed_filter):
+            return False
+
+    return True
+
+
+def main() -> None:
+    args = _parse_args()
+    scripts_dir = Path(args.scripts_dir)
+
+    if not scripts_dir.exists():
+        print(
+            f"ERROR: scripts directory not found: {scripts_dir}\n"
+            "Run generate_configs.py first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    all_scripts = sorted(scripts_dir.glob("*.sbatch"))
+    if not all_scripts:
+        print(
+            f"No .sbatch files found in {scripts_dir}.\n"
+            "Run generate_configs.py first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    selected = [
+        script for script in all_scripts
+        if _matches_filter(script.name, args.solvers, args.n, args.seeds)
+    ]
+
+    if not selected:
+        print("No scripts match the given filters.")
+        sys.exit(0)
+
+    submitted = 0
+    failed = 0
+
+    for script in selected:
+        cmd = ["sbatch", str(script)]
+        if args.dry_run:
+            print(f"[DRY] {' '.join(cmd)}")
+            submitted += 1
+            continue
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print(f"Submitted {script.name}  →  {result.stdout.strip()}")
+            submitted += 1
+        except subprocess.CalledProcessError as ex:
+            print(f"FAILED  {script.name}: {ex.stderr.strip()}", file=sys.stderr)
+            failed += 1
+        except FileNotFoundError:
+            print("ERROR: 'sbatch' not found. Are you on a SLURM login node?", file=sys.stderr)
+            sys.exit(1)
+
+    label = "[DRY] Would submit" if args.dry_run else "Submitted"
+    print(f"\n{label} {submitted} jobs" + (f", {failed} failed" if failed else "") + ".")
+
+
+if __name__ == "__main__":
+    main()
