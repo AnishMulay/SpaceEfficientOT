@@ -2,8 +2,8 @@
 """Batch job dispatcher — NYC taxi POT comparison experiment.
 
 Each SLURM job calls this script with a single JSON config file.
-It dispatches to run_spef.py or run_pot.py based on the "solver" field,
-writes result.json + meta.json to a unique per-run directory, and exits.
+It dispatches the combined runner, writes result.json + meta.json to a unique
+per-run directory, and exits.
 
 No shared CSV is written here. Use aggregate_results.py after all jobs finish.
 """
@@ -22,8 +22,7 @@ from typing import Any, Dict, Tuple
 
 EXP_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXP_DIR.parents[1]
-RUN_SPEF_PY = EXP_DIR / "run_spef.py"
-RUN_POT_PY = EXP_DIR / "run_pot.py"
+RUN_COMBINED_PY = EXP_DIR / "run_combined.py"
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +60,7 @@ def _run_id(cfg: Dict[str, Any]) -> str:
         "solver", "input", "date", "n", "seed",
         "speed_mps", "y_max_meters", "future_only",
         "delta", "C", "k", "stopping_condition",
-        "top_k",
+        "fill_policy", "device",
     )
     sel = {k: cfg.get(k) for k in key_fields}
     payload = json.dumps(sel, sort_keys=True, separators=(",", ":"))
@@ -79,15 +78,14 @@ def _run_dir_name(cfg: Dict[str, Any]) -> str:
 # Command builders
 # ---------------------------------------------------------------------------
 
-def _build_spef_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
-    cmd = [sys.executable, str(RUN_SPEF_PY)]
+def _build_combined_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
+    cmd = [sys.executable, str(RUN_COMBINED_PY)]
 
     def add(flag: str, key: str) -> None:
         val = cfg.get(key)
         if val is not None:
             cmd.extend([flag, str(val)])
 
-    cmd.extend(["--solver", cfg["solver"]])
     add("--input", "input")
     add("--date", "date")
     add("--n", "n")
@@ -117,36 +115,14 @@ def _build_spef_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
     return cmd
 
 
-def _build_pot_cmd(cfg: Dict[str, Any], out_path: Path) -> list[str]:
-    cmd = [sys.executable, str(RUN_POT_PY)]
+def _extract_duration_sec(data: Dict[str, Any]) -> float | None:
+    perf = data.get("performance")
+    if isinstance(perf, dict):
+        runtime = perf.get("runtime_sec")
+        if runtime is not None:
+            return float(runtime)
 
-    def add(flag: str, key: str) -> None:
-        val = cfg.get(key)
-        if val is not None:
-            cmd.extend([flag, str(val)])
-
-    add("--input", "input")
-    add("--date", "date")
-    add("--n", "n")
-    add("--seed", "seed")
-    add("--top-k", "top_k")
-    add("--speed-mps", "speed_mps")
-    add("--y-max-meters", "y_max_meters")
-    add("--origin-lon", "origin_lon")
-    add("--origin-lat", "origin_lat")
-
-    if cfg.get("random_sample") is True:
-        cmd.append("--random-sample")
-    elif cfg.get("random_sample") is False:
-        cmd.append("--no-random-sample")
-
-    if cfg.get("future_only") is True:
-        cmd.append("--future-only")
-    elif cfg.get("future_only") is False:
-        cmd.append("--no-future-only")
-
-    cmd.extend(["--out", str(out_path)])
-    return cmd
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +140,7 @@ def run_once(
         cfg: Dict[str, Any] = json.load(f)
 
     solver = cfg.get("solver", "")
-    if solver not in ("spef_unscaled", "spef_scaled", "pot_partial"):
+    if solver != "combined":
         print(f"ERROR: unknown solver {solver!r}", file=sys.stderr)
         return 1, results_dir / "result.json"
 
@@ -190,10 +166,7 @@ def run_once(
             pass
 
     # Build command
-    if solver in ("spef_unscaled", "spef_scaled"):
-        cmd = _build_spef_cmd(cfg, artifact_tmp)
-    else:
-        cmd = _build_pot_cmd(cfg, artifact_tmp)
+    cmd = _build_combined_cmd(cfg, artifact_tmp)
 
     if print_cmd:
         print("CMD:", " ".join(cmd), flush=True)
@@ -268,7 +241,7 @@ def run_once(
     duration = None
     try:
         data = _read_json(artifact)
-        duration = data.get("performance", {}).get("runtime_sec")
+        duration = _extract_duration_sec(data)
     except Exception:
         pass
 

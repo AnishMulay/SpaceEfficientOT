@@ -11,8 +11,8 @@ Examples
 Submit everything:
   python experiments/nyc_taxi_pot_comparison/batch/submit_experiments.py
 
-Submit only the two SPEF solvers first:
-  python experiments/nyc_taxi_pot_comparison/batch/submit_experiments.py --solvers spef_unscaled spef_scaled
+Submit only the combined jobs:
+  python experiments/nyc_taxi_pot_comparison/batch/submit_experiments.py --solvers combined
 
 Submit only n=1000,2000 as a quick sanity check:
   python experiments/nyc_taxi_pot_comparison/batch/submit_experiments.py --n 1000 2000
@@ -35,7 +35,7 @@ def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Submit POT-comparison sbatch jobs to SLURM")
     ap.add_argument(
         "--solvers", nargs="+",
-        choices=["spef_unscaled", "spef_scaled", "pot_partial"],
+        choices=["combined"],
         default=None,
         help="Restrict to these solvers (default: all available solvers)",
     )
