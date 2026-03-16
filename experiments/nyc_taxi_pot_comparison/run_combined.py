@@ -78,7 +78,7 @@ class ExperimentConfig:
     seed: int = 1
     device: str | None = "cuda"
     k: int = 512
-    delta: float = 0.001
+    delta: float = 0.0001
     stopping_condition: int | None = 50
     C: float | None = 100000.0
     speed_mps: float | None = 8.0
@@ -337,8 +337,9 @@ def _run_pot(
     m = float(top_k) / float(n) if n > 0 else 0.0
 
     log("Solving POT partial Wasserstein...")
+    print(f"[POT] top_k={top_k}, m={m:.6f}, delta={config.delta}, nb_dummies=10, numItermax=10000000")
     t_solve_start = time.perf_counter()
-    gamma = ot.partial.partial_wasserstein(a, b, M, m=m, nb_dummies=10, numItermax=1000000)
+    gamma = ot.partial.partial_wasserstein(a, b, M, m=m, nb_dummies=10, numItermax=10000000)
     solve_time = time.perf_counter() - t_solve_start
     total_runtime = build_time + solve_time
     log(f"POT solve finished in {solve_time:.3f}s")

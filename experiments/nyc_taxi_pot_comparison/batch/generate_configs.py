@@ -28,7 +28,7 @@ FIXED = {
     "future_only": True,
     "fill_policy": "none",
     "device": "cuda",
-    "delta": 0.001,
+    "delta": 0.0001,
     "C": 100000.0,
     "k": 512,
 }
